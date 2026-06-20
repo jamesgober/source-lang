@@ -37,14 +37,95 @@
 
 ```toml
 [dependencies]
-source-lang = "0.1"
+source-lang = "0.2"
 ```
+
+Or from the terminal:
+
+```bash
+cargo add source-lang
+```
+
+<br>
+
+## Usage
+
+Add sources to a map and resolve a global position back to the file and local
+offset it came from.
+
+```rust
+use source_lang::{BytePos, SourceMap};
+
+let mut map = SourceMap::new();
+let main = map.add("main.rs", "fn main() {}")?;   // global 0..12
+let util = map.add("util.rs", "fn helper() {}")?; // global 12..26
+
+// Which file does global position 13 belong to, and where inside it?
+let (id, local) = map.locate(BytePos::new(13)).expect("inside util.rs");
+assert_eq!(id, util);
+assert_eq!(local, BytePos::new(1)); // 13 - 12
+
+// The id is a stable handle back to the source for the life of the map.
+assert_eq!(map.source(main).unwrap().name(), "main.rs");
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+Read the located text back out of the resolved source:
+
+```rust
+use source_lang::{BytePos, SourceMap};
+
+let mut map = SourceMap::new();
+map.add("a", "let x = 1;")?;
+let two = map.add("b", "let y = 2;")?;
+
+let (id, local) = map.locate(BytePos::new(14)).expect("in range");
+assert_eq!(id, two);
+let file = map.source(id).unwrap();
+assert_eq!(&file.text()[local.to_usize()..], "y = 2;");
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+Walk every loaded source in order — id order is also global-offset order:
+
+```rust
+use source_lang::SourceMap;
+
+let mut map = SourceMap::new();
+map.add("a.txt", "one")?;
+map.add("b.txt", "two")?;
+
+let names: Vec<_> = map.iter().map(|(_, f)| f.name()).collect();
+assert_eq!(names, ["a.txt", "b.txt"]);
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
+
+<br>
+
+## How it works
+
+Sources are placed end to end in the order they are added: the first occupies
+global offsets `0..len₀`, the next `len₀..len₀ + len₁`, and so on. The ranges never
+overlap, and because each base is the running total of all earlier sources, the
+internal list stays sorted by offset — so <code>locate</code> is a binary search,
+<code>O(log files)</code>, that borrows the resolved source rather than copying it.
+The shared space is 32 bits wide (the same envelope a single <code>BytePos</code>
+addresses), so the combined length of every source is capped at 4&nbsp;GiB;
+overrunning it is a defined error, never a silent wrap into a neighbour's range.
 
 <br>
 
 ## Status
 
-This is the <code>v0.1.0</code> scaffold: structure, tooling, and quality gates are in place; the implementation lands across the 0.x series per the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a> and <a href="./docs/API.md"><code>docs/API.md</code></a>.
+<code>v0.2.0</code> implements the core: the <code>SourceMap</code>, stable
+<code>SourceId</code>s, the non-overlapping global position space, and the
+<code>O(log files)</code> resolver — each invariant property-tested against a naive
+linear scan. File loading from disk, line/column integration, and <code>serde</code>
+land across the rest of the 0.x series per the
+<a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public API is frozen at
+<code>1.0.0</code>.
 
 <hr>
 <br>

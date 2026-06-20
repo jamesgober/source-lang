@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "source-lang"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -45,14 +45,16 @@ path = "src/lib.rs"
 # #################################
 [features]
 default = ["std"]
-std = []
+std = ["span-lang/std"]
 # Serialization support.
-serde = ["dep:serde"]
+serde = ["dep:serde", "span-lang/serde"]
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
+# Positions and spans: the per-buffer coordinate substrate this crate maps over.
+span-lang = { version = "0.4", default-features = false }
 serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
 
 
