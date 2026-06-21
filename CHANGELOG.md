@@ -21,6 +21,21 @@
 
 ---
 
+## [1.0.0] - 2026-06-20
+
+The stable release. No new public API — this ratifies the surface frozen in `0.4.0`
+as the `1.0` contract, with a recorded SemVer promise and the full property-test and
+benchmark suite verified on Linux, macOS, and Windows.
+
+### Changed
+
+- The public API is **stable** and follows Semantic Versioning: no breaking changes
+  before `2.0`. The promise is recorded in [`docs/API.md`](docs/API.md#semver-promise);
+  `SourceMapError` stays `#[non_exhaustive]` so new error variants remain minor
+  changes, and the MSRV (Rust 1.85) only rises in a minor release.
+
+---
+
 ## [0.4.0] - 2026-06-20
 
 Optional `serde` support and the public-surface freeze. The source map can be
@@ -125,7 +140,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/source-lang/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/source-lang/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/source-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/source-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/source-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/source-lang/compare/v0.1.0...v0.2.0

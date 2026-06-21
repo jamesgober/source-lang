@@ -51,6 +51,13 @@
 //! assert_eq!(map.source(main).unwrap().name(), "main.rs");
 //! # Ok::<(), source_lang::SourceMapError>(())
 //! ```
+//!
+//! ## Stability
+//!
+//! The public API is stable as of `1.0` and follows Semantic Versioning: no
+//! breaking changes before `2.0`, additions arrive in minor releases, and the MSRV
+//! (Rust 1.85) only rises in a minor. The full promise is in
+//! [`docs/API.md`](https://github.com/jamesgober/source-lang/blob/main/docs/API.md).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

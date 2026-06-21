@@ -1,14 +1,14 @@
 # source-lang &mdash; API Reference
 
 > Complete reference for every public item in `source-lang`, with examples.
-> **Status: frozen.** As of `0.4.0` the public surface below is complete and will
-> not change before `1.0.0` — only documentation, tests, and internal work follow.
-> `1.0.0` ratifies this surface and holds it stable until `2.0`. See
-> [`dev/ROADMAP.md`](../dev/ROADMAP.md).
+> **Status: stable (1.0).** The public surface below is the `1.0` contract; it
+> follows [Semantic Versioning](#semver-promise) and will not change in a breaking
+> way before `2.0`. See [`dev/ROADMAP.md`](../dev/ROADMAP.md).
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Stability & SemVer promise](#semver-promise)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [The model](#the-model)
@@ -48,11 +48,33 @@ rendering live in other crates.
 
 ---
 
+## SemVer promise
+
+As of `1.0.0` the public API documented here is **stable**. The crate follows
+[Semantic Versioning](https://semver.org):
+
+- No item in this reference will be **removed or changed in a breaking way** within
+  the `1.x` series. Breaking changes wait for `2.0`.
+- New functionality arrives in **minor** releases (`1.1`, `1.2`, …) and is additive.
+  `SourceMapError` is `#[non_exhaustive]`, so a new error variant is a minor change,
+  not a breaking one — match it with a wildcard arm.
+- Bug fixes, documentation, and internal optimisation are **patch** releases.
+- The **MSRV** is Rust `1.85`. Raising it is treated as a minor change and called
+  out in the changelog; it is never a patch.
+- The **`serde` wire format** is part of the contract: a `SourceMap` serialised by
+  one `1.x` reads back in any later `1.x`. The `max_source_len` field is optional on
+  read so that older documents continue to load.
+
+Anything not in this reference — internal modules, field layouts, exact `Debug`
+output — is not part of the contract and may change at any time.
+
+---
+
 ## Installation
 
 ```toml
 [dependencies]
-source-lang = "0.4"
+source-lang = "1.0"
 ```
 
 Or from the terminal:

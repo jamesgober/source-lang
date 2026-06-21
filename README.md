@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: stable (1.0).</strong> The public API is frozen and follows Semantic Versioning &mdash; no breaking changes before <code>2.0</code>. See <a href="./docs/API.md#semver-promise"><code>the SemVer promise</code></a> and <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 
@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-source-lang = "0.4"
+source-lang = "1.0"
 ```
 
 Or from the terminal:
@@ -170,16 +170,14 @@ overrunning it is a defined error, never a silent wrap into a neighbour's range.
 
 ## Status
 
-<code>v0.4.0</code> adds optional <code>serde</code> support and <strong>freezes the
-public API</strong>: a <code>SourceMap</code> round-trips through any serde format,
-and no public items will change before <code>1.0.0</code>. The surface this freezes
-is the full source map — the <code>SourceMap</code>, stable <code>SourceId</code>s,
+<code>v1.0.0</code> is the stable release: the public API is frozen and follows
+Semantic Versioning, with no breaking changes before <code>2.0</code>. The surface is
+the full source map &mdash; the <code>SourceMap</code>, stable <code>SourceId</code>s,
 and the non-overlapping global position space with its <code>O(log files)</code>
-resolver (from <code>v0.2.0</code>), plus disk and buffer loading and
-<code>line_col</code> resolution (from <code>v0.3.0</code>) — each invariant
-property-tested against a naive linear scan. <code>1.0.0</code> ratifies this surface
-and holds it stable until <code>2.0</code>; see the
-<a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+resolver, disk and buffer loading, <code>line_col</code> resolution, and optional
+<code>serde</code> &mdash; each invariant property-tested against a naive linear
+scan, verified on Linux, macOS, and Windows. See the
+<a href="./docs/API.md#semver-promise"><code>SemVer promise</code></a>.
 
 <hr>
 <br>
