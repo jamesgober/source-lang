@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use span_lang::{BytePos, Span};
+use span_lang::{BytePos, LineCol, Span};
 
 use crate::{SourceFile, SourceId, SourceMapError};
 
@@ -50,7 +50,7 @@ use crate::{SourceFile, SourceId, SourceMapError};
 /// // Anything past the last byte belongs to no file.
 /// assert_eq!(map.locate(BytePos::new(26)), None);
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SourceMap {
     /// Sources in insertion order; always sorted by `span().start()` because
     /// each new base is the previous high-water mark.
@@ -58,10 +58,24 @@ pub struct SourceMap {
     /// The next free global offset — the exclusive end of the last source's
     /// range, and the base the next source will be placed at.
     next_base: u32,
+    /// The largest a single source may be, in bytes. Defaults to `u32::MAX`; a
+    /// smaller value bounds how much one untrusted input can load.
+    max_source_len: u32,
+}
+
+impl Default for SourceMap {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SourceMap {
     /// Creates an empty map whose global position space starts at `0`.
+    ///
+    /// The per-source size ceiling starts at `u32::MAX`; lower it with
+    /// [`set_max_source_len`](SourceMap::set_max_source_len) to bound untrusted
+    /// input.
     ///
     /// # Examples
     ///
@@ -77,6 +91,7 @@ impl SourceMap {
         Self {
             files: Vec::new(),
             next_base: 0,
+            max_source_len: u32::MAX,
         }
     }
 
@@ -102,7 +117,54 @@ impl SourceMap {
         Self {
             files: Vec::with_capacity(capacity),
             next_base: 0,
+            max_source_len: u32::MAX,
         }
+    }
+
+    /// Returns the current per-source size ceiling, in bytes.
+    ///
+    /// A source longer than this is rejected with
+    /// [`SourceMapError::Oversize`] before it consumes any global space. The
+    /// default is `u32::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use source_lang::SourceMap;
+    ///
+    /// let map = SourceMap::new();
+    /// assert_eq!(map.max_source_len(), u32::MAX);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn max_source_len(&self) -> u32 {
+        self.max_source_len
+    }
+
+    /// Sets the largest a single source may be, in bytes.
+    ///
+    /// Use it to bound how much one untrusted input — a file named on a command
+    /// line, a buffer from the network — can pull into memory. The limit applies
+    /// to every later [`add`](SourceMap::add), [`add_bytes`](SourceMap::add_bytes),
+    /// and [`add_file`](SourceMap::add_file); for a file it is checked against the
+    /// path's metadata before any bytes are read. Sources already in the map are
+    /// unaffected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use source_lang::{SourceMap, SourceMapError};
+    ///
+    /// let mut map = SourceMap::new();
+    /// map.set_max_source_len(8);
+    ///
+    /// assert!(map.add("ok", "12345678").is_ok()); // exactly 8 bytes
+    /// let err = map.add("big", "123456789").unwrap_err(); // 9 bytes
+    /// assert!(matches!(err, SourceMapError::Oversize { len: 9, .. }));
+    /// ```
+    #[inline]
+    pub fn set_max_source_len(&mut self, max: u32) {
+        self.max_source_len = max;
     }
 
     /// Adds a source under `name` with the given `text`, returning its
@@ -143,8 +205,126 @@ impl SourceMap {
         name: impl Into<Box<str>>,
         text: impl Into<Box<str>>,
     ) -> Result<SourceId, SourceMapError> {
-        let text = text.into();
+        self.push(name.into(), text.into())
+    }
+
+    /// Validates raw bytes as UTF-8 and adds them as a source under `name`.
+    ///
+    /// This is the in-memory counterpart to [`add_file`](SourceMap::add_file):
+    /// both turn untrusted bytes — from a buffer here, from disk there — into a
+    /// stored source through the same checks, so a network buffer and a file on
+    /// disk fail and succeed the same way.
+    ///
+    /// # Errors
+    ///
+    /// - [`SourceMapError::NotUtf8`] if `bytes` are not valid UTF-8.
+    /// - [`SourceMapError::Oversize`] if they exceed
+    ///   [`max_source_len`](SourceMap::max_source_len).
+    /// - [`SourceMapError::SpaceExhausted`] if they do not fit in the remaining
+    ///   global space.
+    ///
+    /// On any error the map is left unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use source_lang::{SourceMap, SourceMapError};
+    ///
+    /// let mut map = SourceMap::new();
+    /// let id = map.add_bytes("greeting.txt", b"hello").expect("valid UTF-8");
+    /// assert_eq!(map.source(id).unwrap().text(), "hello");
+    ///
+    /// // A stray binary byte is rejected, not stored as corrupt text.
+    /// let err = map.add_bytes("blob", &[0xff]).unwrap_err();
+    /// assert!(matches!(err, SourceMapError::NotUtf8 { .. }));
+    /// ```
+    pub fn add_bytes(
+        &mut self,
+        name: impl Into<Box<str>>,
+        bytes: &[u8],
+    ) -> Result<SourceId, SourceMapError> {
+        let name = name.into();
+        match core::str::from_utf8(bytes) {
+            Ok(text) => self.push(name, Box::from(text)),
+            Err(_) => Err(SourceMapError::NotUtf8 { name }),
+        }
+    }
+
+    /// Reads a file from disk and adds its contents as a source named by `path`.
+    ///
+    /// The file's size is checked against [`max_source_len`](SourceMap::max_source_len)
+    /// from its metadata *before* a single byte is read, so an oversize file is
+    /// rejected without being loaded into memory. The bytes are then validated as
+    /// UTF-8 and stored. The source's name is the path as given.
+    ///
+    /// # Errors
+    ///
+    /// - [`SourceMapError::Oversize`] if the file's metadata length exceeds
+    ///   [`max_source_len`](SourceMap::max_source_len).
+    /// - [`SourceMapError::Io`] if the path cannot be opened or read (missing
+    ///   file, a directory, permission denied).
+    /// - [`SourceMapError::NotUtf8`] if the contents are not valid UTF-8.
+    /// - [`SourceMapError::SpaceExhausted`] if they do not fit in the remaining
+    ///   global space.
+    ///
+    /// On any error the map is left unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use source_lang::SourceMap;
+    ///
+    /// let mut map = SourceMap::new();
+    /// let id = map.add_file("src/main.rs")?;
+    /// assert_eq!(map.source(id).unwrap().name(), "src/main.rs");
+    /// # Ok::<(), source_lang::SourceMapError>(())
+    /// ```
+    #[cfg(feature = "std")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+    pub fn add_file(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<SourceId, SourceMapError> {
+        use std::io::Read;
+
+        let path = path.as_ref();
+        let name: Box<str> = Box::from(path.to_string_lossy().as_ref());
+
+        let io_err = |e: std::io::Error| SourceMapError::Io {
+            name: name.clone(),
+            kind: e.kind(),
+        };
+
+        // Reject from metadata before reading, so an oversize file never lands in
+        // memory. A file without a queryable length (a pipe, some virtual files)
+        // falls through to the streaming read, which the push guard still bounds.
+        let mut file = std::fs::File::open(path).map_err(io_err)?;
+        if let Ok(meta) = file.metadata() {
+            if meta.len() > u64::from(self.max_source_len) {
+                return Err(SourceMapError::Oversize {
+                    name,
+                    len: meta.len(),
+                });
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let _ = file.read_to_end(&mut bytes).map_err(io_err)?;
+        match core::str::from_utf8(&bytes) {
+            Ok(text) => self.push(name, Box::from(text)),
+            Err(_) => Err(SourceMapError::NotUtf8 { name }),
+        }
+    }
+
+    /// The single insertion seam every loader funnels through: enforce the size
+    /// limits, assign a non-overlapping range, and append. Nothing is mutated
+    /// until both limits pass, so a rejected add leaves the map untouched.
+    fn push(&mut self, name: Box<str>, text: Box<str>) -> Result<SourceId, SourceMapError> {
         let needed = text.len() as u64;
+        if needed > u64::from(self.max_source_len) {
+            return Err(SourceMapError::Oversize { name, len: needed });
+        }
+
         let base = self.next_base;
         // `base` never exceeds `u32::MAX`, so this is the bytes still free.
         let available = u64::from(u32::MAX - base);
@@ -162,7 +342,7 @@ impl SourceMap {
         let end = base + len;
         let span = Span::new(base, end);
         let id = SourceId::from_index(index);
-        self.files.push(SourceFile::new(name.into(), text, span));
+        self.files.push(SourceFile::new(name, text, span));
         self.next_base = end;
         Ok(id)
     }
@@ -214,6 +394,45 @@ impl SourceMap {
         } else {
             None
         }
+    }
+
+    /// Resolves a global position to its source and 1-based line/column.
+    ///
+    /// This is [`locate`](SourceMap::locate) composed with `span-lang`'s line
+    /// index: the position is mapped to its source and local offset, then that
+    /// offset is turned into a [`LineCol`] within the source's own text. The
+    /// column counts Unicode scalar values, so a multi-byte character advances
+    /// the column by one, not by its byte width.
+    ///
+    /// Returns `None` exactly when [`locate`](SourceMap::locate) does — for a
+    /// position past the end of the last source, or at a zero-width source.
+    ///
+    /// Each call builds a line index over the located source, an `O(source len)`
+    /// scan. To resolve many positions in the same source, take a reusable index
+    /// once with [`SourceFile::line_index`] instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use source_lang::{BytePos, LineCol, SourceMap};
+    ///
+    /// let mut map = SourceMap::new();
+    /// map.add("a.rs", "fn a() {}").expect("fits"); // 0..9
+    /// let b = map.add("b.rs", "let x = 1;\nlet y = 2;").expect("fits"); // 9..30
+    ///
+    /// // Global 20 is the second line of b.rs ("let y = 2;").
+    /// let (id, lc) = map.line_col(BytePos::new(20)).expect("in range");
+    /// assert_eq!(id, b);
+    /// assert_eq!(lc, LineCol::new(2, 1));
+    /// ```
+    #[must_use]
+    pub fn line_col(&self, pos: BytePos) -> Option<(SourceId, LineCol)> {
+        let (id, local) = self.locate(pos)?;
+        // `locate` returned this id, so the source is present.
+        let line_col = self.files[id.to_u32() as usize]
+            .line_index()
+            .line_col(local);
+        Some((id, line_col))
     }
 
     /// Borrows the source named by `id`, or `None` if the id is not from this map.
@@ -426,5 +645,103 @@ mod tests {
         assert_eq!(iter.len(), 5);
         let collected: Vec<_> = iter.by_ref().map(|(id, _)| id.to_u32()).collect();
         assert_eq!(collected, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_add_bytes_stores_valid_utf8() {
+        let mut map = SourceMap::new();
+        let id = map
+            .add_bytes("greeting", "héllo".as_bytes())
+            .expect("valid");
+        assert_eq!(map.source(id).unwrap().text(), "héllo");
+    }
+
+    #[test]
+    fn test_add_bytes_rejects_invalid_utf8_and_leaves_map_unchanged() {
+        let mut map = SourceMap::new();
+        // A lone continuation byte is not valid UTF-8.
+        let err = map.add_bytes("blob", &[0x68, 0xff, 0x69]).unwrap_err();
+        match err {
+            SourceMapError::NotUtf8 { name } => assert_eq!(&*name, "blob"),
+            other => panic!("expected NotUtf8, got {other:?}"),
+        }
+        assert!(map.is_empty());
+        assert_eq!(map.next_base, 0);
+    }
+
+    #[test]
+    fn test_add_bytes_empty_is_a_zero_width_source() {
+        let mut map = SourceMap::new();
+        let id = map
+            .add_bytes("empty", b"")
+            .expect("zero bytes are valid utf8");
+        assert!(map.source(id).unwrap().span().is_empty());
+    }
+
+    #[test]
+    fn test_max_source_len_rejects_at_the_byte_boundary() {
+        let mut map = SourceMap::new();
+        map.set_max_source_len(4);
+        assert_eq!(map.max_source_len(), 4);
+
+        // Exactly the limit fits; one byte over does not.
+        let ok = map.add("ok", "abcd").expect("exactly the limit");
+        assert_eq!(map.source(ok).unwrap().span().len(), 4);
+
+        let err = map.add("big", "abcde").unwrap_err();
+        match err {
+            SourceMapError::Oversize { name, len } => {
+                assert_eq!(&*name, "big");
+                assert_eq!(len, 5);
+            }
+            other => panic!("expected Oversize, got {other:?}"),
+        }
+        // The rejected add did not advance the space.
+        assert_eq!(map.next_base, 4);
+    }
+
+    #[test]
+    fn test_oversize_is_checked_before_space_exhaustion() {
+        let mut map = SourceMap::new();
+        map.set_max_source_len(2);
+        map.next_base = u32::MAX; // no global space left at all
+        // The per-source ceiling is reported, not space exhaustion.
+        let err = map.add("x", "abc").unwrap_err();
+        assert!(matches!(err, SourceMapError::Oversize { len: 3, .. }));
+    }
+
+    #[test]
+    fn test_line_col_resolves_across_files_and_lines() {
+        let mut map = SourceMap::new();
+        let a = map.add("a", "ab\ncd").expect("fits"); // 0..5, lines 1-2
+        let b = map.add("b", "wx\nyz").expect("fits"); // 5..10, lines 1-2
+
+        // First file, first line.
+        assert_eq!(map.line_col(BytePos::new(0)), Some((a, LineCol::new(1, 1))));
+        // First file, second line, second column ('d').
+        assert_eq!(map.line_col(BytePos::new(4)), Some((a, LineCol::new(2, 2))));
+        // Second file resets to its own line 1, column 1.
+        assert_eq!(map.line_col(BytePos::new(5)), Some((b, LineCol::new(1, 1))));
+        // Second file, second line ('y').
+        assert_eq!(map.line_col(BytePos::new(8)), Some((b, LineCol::new(2, 1))));
+    }
+
+    #[test]
+    fn test_line_col_counts_characters_not_bytes() {
+        let mut map = SourceMap::new();
+        // "αβ" is two characters but four bytes; the second char starts at byte 2.
+        let id = map.add("greek", "αβ").expect("fits");
+        assert_eq!(
+            map.line_col(BytePos::new(2)),
+            Some((id, LineCol::new(1, 2)))
+        );
+    }
+
+    #[test]
+    fn test_line_col_out_of_range_is_none() {
+        let mut map = SourceMap::new();
+        map.add("a", "abc").expect("fits"); // 0..3
+        assert_eq!(map.line_col(BytePos::new(3)), None);
+        assert_eq!(map.line_col(BytePos::new(99)), None);
     }
 }

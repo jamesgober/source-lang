@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-source-lang = "0.2"
+source-lang = "0.3"
 ```
 
 Or from the terminal:
@@ -86,6 +86,45 @@ assert_eq!(&file.text()[local.to_usize()..], "y = 2;");
 # Ok::<(), source_lang::SourceMapError>(())
 ```
 
+Resolve a global position to its file and 1-based line/column in one step — what a
+diagnostic renderer needs to print `file:line:col`:
+
+```rust
+use source_lang::{BytePos, LineCol, SourceMap};
+
+let mut map = SourceMap::new();
+map.add("a.rs", "fn a() {}")?;                  // global 0..9
+let b = map.add("b.rs", "let x = 1;\nlet y = 2;")?; // global 9..30
+
+let (id, lc) = map.line_col(BytePos::new(20)).expect("in range");
+assert_eq!(id, b);
+assert_eq!(lc, LineCol::new(2, 1)); // second line of b.rs
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+Load untrusted input — a file from disk or raw bytes from a buffer — through the
+same checks, so bad input is a defined error rather than a panic:
+
+```rust
+use source_lang::{SourceMap, SourceMapError};
+
+let mut map = SourceMap::new();
+map.set_max_source_len(1 << 20); // cap any single source at 1 MiB
+
+// Raw bytes are validated as UTF-8 before they are stored.
+let id = map.add_bytes("config.toml", b"name = \"demo\"")?;
+assert_eq!(map.source(id).unwrap().text(), "name = \"demo\"");
+
+// Non-UTF-8 input is rejected, naming the source.
+let err = map.add_bytes("blob.bin", &[0xff, 0xfe]).unwrap_err();
+assert!(matches!(err, SourceMapError::NotUtf8 { .. }));
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+With the default `std` feature, `map.add_file("src/main.rs")` reads a path from
+disk through those same checks, rejecting an oversize file from its metadata before
+a byte is read.
+
 Walk every loaded source in order — id order is also global-offset order:
 
 ```rust
@@ -119,11 +158,14 @@ overrunning it is a defined error, never a silent wrap into a neighbour's range.
 
 ## Status
 
-<code>v0.2.0</code> implements the core: the <code>SourceMap</code>, stable
-<code>SourceId</code>s, the non-overlapping global position space, and the
-<code>O(log files)</code> resolver — each invariant property-tested against a naive
-linear scan. File loading from disk, line/column integration, and <code>serde</code>
-land across the rest of the 0.x series per the
+<code>v0.3.0</code> adds loading and line resolution on top of the core: sources load
+from disk (<code>add_file</code>) and from raw byte buffers (<code>add_bytes</code>)
+through one set of checks, every bad input is a defined error, and
+<code>line_col</code> resolves a global position to file plus line/column in one
+step. The <code>SourceMap</code>, stable <code>SourceId</code>s, the non-overlapping
+global position space, and the <code>O(log files)</code> resolver from
+<code>v0.2.0</code> remain, each invariant property-tested against a naive linear
+scan. Optional <code>serde</code> for the map metadata lands next per the
 <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public API is frozen at
 <code>1.0.0</code>.
 

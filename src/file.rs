@@ -2,7 +2,7 @@
 
 use alloc::boxed::Box;
 
-use span_lang::Span;
+use span_lang::{LineIndex, Span};
 
 /// A single source held by a [`SourceMap`](crate::SourceMap): a display name, the
 /// owned source text, and the half-open [`Span`] the text occupies in the map's
@@ -110,6 +110,37 @@ impl SourceFile {
     #[must_use]
     pub const fn span(&self) -> Span {
         self.span
+    }
+
+    /// Builds a reusable line index over this source's text.
+    ///
+    /// The returned [`LineIndex`] borrows the source for as long as the
+    /// [`SourceFile`] is borrowed, so it can be kept and queried many times
+    /// without re-scanning. Building it is the only `O(text len)` step; each
+    /// `line_col` / `offset` lookup on it is sub-linear.
+    ///
+    /// Prefer this over [`SourceMap::line_col`](crate::SourceMap::line_col) when
+    /// resolving several positions within one source — that convenience method
+    /// builds a fresh index per call, whereas this builds it once.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use source_lang::{BytePos, LineCol, SourceMap};
+    ///
+    /// let mut map = SourceMap::new();
+    /// let id = map.add("m.rs", "let x = 1;\nlet y = 2;").expect("fits");
+    /// let index = map.source(id).unwrap().line_index();
+    ///
+    /// // Resolve as many local positions as needed against the one index.
+    /// assert_eq!(index.line_col(BytePos::new(0)), LineCol::new(1, 1));
+    /// assert_eq!(index.line_col(BytePos::new(11)), LineCol::new(2, 1));
+    /// assert_eq!(index.line_count(), 2);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn line_index(&self) -> LineIndex<'_> {
+        LineIndex::new(&self.text)
     }
 }
 

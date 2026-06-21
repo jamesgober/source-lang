@@ -21,6 +21,40 @@
 
 ---
 
+## [0.3.0] - 2026-06-20
+
+File loading and line integration. Sources can now be loaded from disk and from
+raw byte buffers behind one set of checks, every bad input is a defined error, and
+a global position resolves to file plus 1-based line/column in one step.
+
+### Added
+
+- `SourceMap::add_bytes` — validates raw bytes as UTF-8 and adds them as a source,
+  the in-memory counterpart to file loading.
+- `SourceMap::add_file` (feature `std`) — reads a file from disk, checking its size
+  from metadata before any bytes are read, then validating UTF-8.
+- `SourceMap::line_col` — resolves a global position to its source and a `LineCol`
+  in one step, composing `locate` with `span-lang`'s line index.
+- `SourceFile::line_index` — builds a reusable `span-lang` `LineIndex` over a
+  source's text, for resolving many positions in one source without re-scanning.
+- `SourceMap::set_max_source_len` / `max_source_len` — a configurable per-source
+  size ceiling (default `u32::MAX`) that bounds how much one untrusted input loads.
+- `SourceMapError` variants `Oversize`, `NotUtf8`, and `Io` (the last under `std`),
+  each naming the source it concerns.
+- `LineCol` and `LineIndex` re-exported from the crate root.
+- File-loading integration tests (`tests/loading.rs`) covering a missing path, a
+  directory, non-UTF-8 contents, and the size ceiling on a real filesystem.
+- A property test checking `line_col` against per-file `LineIndex` resolution, and a
+  `criterion` benchmark for the `line_col` path.
+
+### Changed
+
+- **Breaking:** `SourceMapError` no longer derives `Copy`. Its file-loading variants
+  carry the offending source's name (a `Box<str>`), so the type is `Clone` but not
+  `Copy`. It remains `#[non_exhaustive]`, so a `match` already needed a wildcard arm.
+
+---
+
 ## [0.2.0] - 2026-06-20
 
 Source storage and the global position space. This release implements the core the
@@ -67,6 +101,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/source-lang/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/source-lang/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/source-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/source-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/source-lang/releases/tag/v0.1.0

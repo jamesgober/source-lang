@@ -53,5 +53,30 @@ fn bench_locate(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_locate);
+/// Resolving a global position all the way to line/column. This is `locate`
+/// followed by a line-index build over the located source, so the cost is
+/// dominated by the per-source scan; the benchmark fixes the source length and
+/// varies the file count to show the lookup itself stays sub-linear.
+fn bench_line_col(c: &mut Criterion) {
+    let mut group = c.benchmark_group("line_col");
+    let file_len = 256;
+
+    for &count in &[16usize, 256, 4096, 65_536] {
+        let map = build_map(count, file_len);
+        let span_end = (count * file_len) as u32;
+        let probe_set = probes(span_end, 1024);
+
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
+            b.iter(|| {
+                for &pos in &probe_set {
+                    black_box(map.line_col(black_box(pos)));
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_locate, bench_line_col);
 criterion_main!(benches);

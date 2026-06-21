@@ -4,12 +4,23 @@
 //! sources — files and in-memory buffers — in one [`SourceMap`], gives each a
 //! stable [`SourceId`], lays them out across a single global position space, and
 //! resolves any global [`BytePos`] back to the source and local offset it came
-//! from.
+//! from — or, in one step, to the source and a 1-based [`LineCol`].
 //!
 //! It is the layer above [`span_lang`]: a [`Span`] says *where in a buffer* an
 //! error is, and this crate says *which buffer*, so a diagnostic can name the
 //! file as well as the position. It owns source storage and coordinate mapping
 //! only — no lexing, no diagnostic rendering.
+//!
+//! ## Loading sources
+//!
+//! Sources come from three places, all funnelling through the same checks so a
+//! buffer and a file fail and succeed the same way:
+//! [`add`](SourceMap::add) for text already in hand,
+//! [`add_bytes`](SourceMap::add_bytes) for raw bytes validated as UTF-8, and
+//! [`add_file`](SourceMap::add_file) (with the `std` feature) for a path read
+//! from disk. Bad input is a defined [`SourceMapError`] — oversize, non-UTF-8,
+//! or an I/O failure — never a panic. [`set_max_source_len`](SourceMap::set_max_source_len)
+//! caps how much one untrusted source may load.
 //!
 //! ## Model
 //!
@@ -59,5 +70,6 @@ pub use id::SourceId;
 pub use map::SourceMap;
 
 // Re-exported so a downstream consuming this crate's API does not also have to
-// name `span-lang` as a dependency just to spell the position types it returns.
-pub use span_lang::{BytePos, Span};
+// name `span-lang` as a dependency just to spell the position and coordinate
+// types this crate returns.
+pub use span_lang::{BytePos, LineCol, LineIndex, Span};

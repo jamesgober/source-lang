@@ -15,11 +15,16 @@
   - [`SourceMap::new`](#sourcemapnew)
   - [`SourceMap::with_capacity`](#sourcemapwith_capacity)
   - [`SourceMap::add`](#sourcemapadd)
+  - [`SourceMap::add_bytes`](#sourcemapadd_bytes)
+  - [`SourceMap::add_file`](#sourcemapadd_file)
   - [`SourceMap::locate`](#sourcemaplocate)
+  - [`SourceMap::line_col`](#sourcemapline_col)
   - [`SourceMap::source`](#sourcemapsource)
+  - [`SourceMap::max_source_len` / `set_max_source_len`](#sourcemapmax_source_len--set_max_source_len)
   - [`SourceMap::len` / `is_empty`](#sourcemaplen--is_empty)
   - [`SourceMap::iter`](#sourcemapiter)
 - [`SourceFile`](#sourcefile)
+  - [`SourceFile::line_index`](#sourcefileline_index)
 - [`SourceId`](#sourceid)
 - [`SourceMapError`](#sourcemaperror)
 - [Re-exported coordinate types](#re-exported-coordinate-types)
@@ -45,7 +50,7 @@ rendering live in other crates.
 
 ```toml
 [dependencies]
-source-lang = "0.2"
+source-lang = "0.3"
 ```
 
 Or from the terminal:
@@ -55,9 +60,11 @@ cargo add source-lang
 ```
 
 The crate is `no_std`-friendly: it needs `alloc` but not the full standard
-library. The default `std` feature is reserved for the disk file-loading that
-lands in a later phase; with `default-features = false`, in-memory sources work
-exactly as documented here.
+library. The default `std` feature enables disk file-loading
+([`add_file`](#sourcemapadd_file)); with `default-features = false` the crate stays
+`no_std`, and in-memory sources — [`add`](#sourcemapadd),
+[`add_bytes`](#sourcemapadd_bytes), and all resolution — work exactly as documented
+here.
 
 ---
 
@@ -217,8 +224,118 @@ fn load(map: &mut SourceMap, name: &str, text: &str) {
         Err(SourceMapError::SpaceExhausted { needed, available }) => {
             eprintln!("{name}: {needed} bytes did not fit ({available} left)");
         }
+        // `SourceMapError` is `#[non_exhaustive]`, so a wildcard is required.
+        Err(e) => eprintln!("{name}: {e}"),
     }
 }
+```
+
+### `SourceMap::add_bytes`
+
+```rust
+pub fn add_bytes(
+    &mut self,
+    name: impl Into<Box<str>>,
+    bytes: &[u8],
+) -> Result<SourceId, SourceMapError>
+```
+
+Validates raw bytes as UTF-8 and adds them as a source. This is the in-memory
+counterpart to [`add_file`](#sourcemapadd_file): a buffer from the network and a
+file on disk pass through the same checks, so they succeed and fail the same way.
+
+**Parameters**
+
+- `name` — a display name for diagnostics, as for [`add`](#sourcemapadd).
+- `bytes` — the candidate source content. Borrowed, not taken: it is copied into
+  owned storage only once validation passes.
+
+**Errors**
+
+- [`SourceMapError::NotUtf8`](#sourcemaperror) if `bytes` are not valid UTF-8.
+- [`SourceMapError::Oversize`](#sourcemaperror) if they exceed
+  [`max_source_len`](#sourcemapmax_source_len--set_max_source_len).
+- [`SourceMapError::SpaceExhausted`](#sourcemaperror) if they do not fit in the
+  remaining global space.
+
+On any error the map is left unchanged.
+
+```rust
+use source_lang::SourceMap;
+
+let mut map = SourceMap::new();
+let id = map.add_bytes("greeting.txt", b"hello").expect("valid UTF-8");
+assert_eq!(map.source(id).unwrap().text(), "hello");
+```
+
+Rejecting binary input rather than storing it as corrupt text:
+
+```rust
+use source_lang::{SourceMap, SourceMapError};
+
+let mut map = SourceMap::new();
+let err = map.add_bytes("blob.bin", &[0xff, 0xfe]).unwrap_err();
+assert!(matches!(err, SourceMapError::NotUtf8 { .. }));
+```
+
+### `SourceMap::add_file`
+
+```rust
+#[cfg(feature = "std")]
+pub fn add_file(
+    &mut self,
+    path: impl AsRef<std::path::Path>,
+) -> Result<SourceId, SourceMapError>
+```
+
+Reads a file from disk and adds its contents as a source named by `path`. Requires
+the default `std` feature. The file's size is checked against
+[`max_source_len`](#sourcemapmax_source_len--set_max_source_len) from its metadata
+*before* any byte is read, so an oversize file is rejected without being loaded into
+memory. The contents are then validated as UTF-8 and stored.
+
+**Parameters**
+
+- `path` — the file to read. Anything that is `AsRef<Path>` (a `&str`, `String`,
+  `Path`, or `PathBuf`). The source's name is the path as given.
+
+**Errors**
+
+- [`SourceMapError::Oversize`](#sourcemaperror) if the file's metadata length
+  exceeds [`max_source_len`](#sourcemapmax_source_len--set_max_source_len).
+- [`SourceMapError::Io`](#sourcemaperror) if the path cannot be opened or read — a
+  missing file, a directory, a permission error.
+- [`SourceMapError::NotUtf8`](#sourcemaperror) if the contents are not valid UTF-8.
+- [`SourceMapError::SpaceExhausted`](#sourcemaperror) if they do not fit in the
+  remaining global space.
+
+On any error the map is left unchanged.
+
+```rust,no_run
+use source_lang::SourceMap;
+
+let mut map = SourceMap::new();
+let id = map.add_file("src/main.rs")?;
+assert_eq!(map.source(id).unwrap().name(), "src/main.rs");
+# Ok::<(), source_lang::SourceMapError>(())
+```
+
+Capping how much one file may load before reading it:
+
+```rust,no_run
+use source_lang::{SourceMap, SourceMapError};
+
+let mut map = SourceMap::new();
+map.set_max_source_len(64 * 1024); // 64 KiB per source
+
+match map.add_file("maybe-huge.txt") {
+    Ok(id) => { let _ = id; }
+    Err(SourceMapError::Oversize { name, len }) => {
+        eprintln!("{name}: {len} bytes exceeds the limit; skipped");
+    }
+    Err(e) => return Err(e),
+}
+# Ok::<(), source_lang::SourceMapError>(())
 ```
 
 ### `SourceMap::locate`
@@ -272,6 +389,96 @@ let (id, local) = map.locate(BytePos::new(14)).expect("in range");
 assert_eq!(id, two);
 let file = map.source(id).unwrap();
 assert_eq!(&file.text()[local.to_usize()..], "y = 2;");
+```
+
+### `SourceMap::line_col`
+
+```rust
+pub fn line_col(&self, pos: BytePos) -> Option<(SourceId, LineCol)>
+```
+
+Resolves a global position to its source and 1-based line/column in one step. This
+is [`locate`](#sourcemaplocate) composed with `span-lang`'s line index: the position
+is mapped to its source and local offset, then that offset is turned into a
+[`LineCol`](#re-exported-coordinate-types) within the source's text. The column
+counts Unicode scalar values, so a multi-byte character advances the column by one,
+not by its byte width.
+
+**Parameters**
+
+- `pos` — a global position in the map's shared coordinate space.
+
+**Returns**
+
+`Some((id, line_col))`, or `None` exactly when [`locate`](#sourcemaplocate) returns
+`None` — a position past the end of the last source, or at a zero-width source.
+
+> **Cost.** Each call builds a line index over the located source, an
+> `O(source len)` scan. To resolve many positions in the same source, take a
+> reusable index once with [`SourceFile::line_index`](#sourcefileline_index)
+> instead of calling `line_col` repeatedly.
+
+```rust
+use source_lang::{BytePos, LineCol, SourceMap};
+
+let mut map = SourceMap::new();
+map.add("a.rs", "fn a() {}").expect("fits");            // 0..9
+let b = map.add("b.rs", "let x = 1;\nlet y = 2;").expect("fits"); // 9..30
+
+// Global 20 lands on the second line of b.rs.
+let (id, lc) = map.line_col(BytePos::new(20)).expect("in range");
+assert_eq!(id, b);
+assert_eq!(lc, LineCol::new(2, 1));
+
+// Formats as the editors-and-compilers `line:col`.
+assert_eq!(lc.to_string(), "2:1");
+```
+
+Columns count characters, not bytes:
+
+```rust
+use source_lang::{BytePos, LineCol, SourceMap};
+
+let mut map = SourceMap::new();
+let id = map.add("greek.txt", "αβγ").expect("fits"); // 6 bytes, 3 chars
+
+// Byte 4 is the third character despite being the fifth byte.
+assert_eq!(map.line_col(BytePos::new(4)), Some((id, LineCol::new(1, 3))));
+```
+
+### `SourceMap::max_source_len` / `set_max_source_len`
+
+```rust
+pub const fn max_source_len(&self) -> u32
+pub fn set_max_source_len(&mut self, max: u32)
+```
+
+The largest a single source may be, in bytes, and a setter for it. A source longer
+than the ceiling is rejected with [`SourceMapError::Oversize`](#sourcemaperror)
+before it consumes any global space; for a file the limit is checked against the
+path's metadata before any byte is read. The default is `u32::MAX` — the addressing
+limit of the position space — so by default only a structurally impossible source is
+rejected this way.
+
+**Parameters**
+
+- `max` (setter) — the new per-source ceiling in bytes. Applies to every later
+  [`add`](#sourcemapadd), [`add_bytes`](#sourcemapadd_bytes), and
+  [`add_file`](#sourcemapadd_file); sources already in the map are unaffected.
+
+Use it to bound how much one untrusted input — a path from a command line, a buffer
+from the network — can pull into memory.
+
+```rust
+use source_lang::{SourceMap, SourceMapError};
+
+let mut map = SourceMap::new();
+assert_eq!(map.max_source_len(), u32::MAX);
+
+map.set_max_source_len(8);
+assert!(map.add("ok", "12345678").is_ok()); // exactly 8 bytes
+let err = map.add("big", "123456789").unwrap_err(); // 9 bytes
+assert!(matches!(err, SourceMapError::Oversize { len: 9, .. }));
 ```
 
 ### `SourceMap::source`
@@ -356,6 +563,7 @@ borrowing it from a map — through [`source`](#sourcemapsource) or
 | `name` | `fn name(&self) -> &str` | The display name the source was added under. |
 | `text` | `fn text(&self) -> &str` | The source text, borrowed for the life of the map. |
 | `span` | `const fn span(&self) -> Span` | The file's half-open range in the global space. |
+| `line_index` | `fn line_index(&self) -> LineIndex<'_>` | A reusable line index over the source's text. |
 
 `span().start()` is the global offset of the file's first byte; the file covers
 `start..start + text().len()`. Subtracting `start` from an in-range global position
@@ -376,6 +584,34 @@ assert_eq!(file.span().start().to_u32(), 0);
 ```
 
 `SourceFile` derives `Clone`, `Debug`, `PartialEq`, and `Eq`.
+
+### `SourceFile::line_index`
+
+```rust
+pub fn line_index(&self) -> LineIndex<'_>
+```
+
+Builds a reusable [`LineIndex`](#re-exported-coordinate-types) over this source's
+text. The index borrows the source for as long as the `SourceFile` is borrowed, so
+it can be kept and queried many times without re-scanning. Building it is the only
+`O(text len)` step; each `line_col` / `offset` lookup on it is sub-linear.
+
+Prefer this over [`SourceMap::line_col`](#sourcemapline_col) when resolving several
+positions in one source — that convenience method builds a fresh index per call,
+whereas this builds it once and the caller reuses it.
+
+```rust
+use source_lang::{BytePos, LineCol, SourceMap};
+
+let mut map = SourceMap::new();
+let id = map.add("m.rs", "let x = 1;\nlet y = 2;").expect("fits");
+let index = map.source(id).unwrap().line_index();
+
+// Resolve as many local positions as needed against the one index.
+assert_eq!(index.line_col(BytePos::new(0)), LineCol::new(1, 1));
+assert_eq!(index.line_col(BytePos::new(11)), LineCol::new(2, 1));
+assert_eq!(index.line_count(), 2);
+```
 
 ---
 
@@ -420,25 +656,52 @@ assert_eq!(map.source(first).unwrap().name(), "a.txt");
 ```rust
 #[non_exhaustive]
 pub enum SourceMapError {
+    Oversize { name: Box<str>, len: u64 },
     SpaceExhausted { needed: u64, available: u64 },
+    NotUtf8 { name: Box<str> },
+    #[cfg(feature = "std")]
+    Io { name: Box<str>, kind: std::io::ErrorKind },
 }
 ```
 
-The reason a source could not be added. The enum is `#[non_exhaustive]`: later
-phases add file-loading failures alongside this variant, so a `match` must include
-a wildcard arm. It implements `core::error::Error` and `Display`.
+The reason a source could not be added. The enum is `#[non_exhaustive]`, so a
+downstream `match` must include a wildcard arm. It derives `Clone`, `Debug`,
+`PartialEq`, and `Eq` (it is **not** `Copy`, because the file-loading variants carry
+the offending source's name), and implements `core::error::Error` and `Display`.
 
-**`SpaceExhausted { needed, available }`** — the source did not fit in what
-remained of the map's capacity.
+**`Oversize { name, len }`** — the source is larger than the map's per-source
+ceiling ([`max_source_len`](#sourcemapmax_source_len--set_max_source_len)).
+
+- `name` — display name of the rejected source.
+- `len` — its byte length.
+
+For a file the length comes from the path's metadata, so an oversize file is rejected
+before its bytes are read.
+
+**`SpaceExhausted { needed, available }`** — the source is within the per-source
+ceiling but does not fit in what remains of the shared global space.
 
 - `needed` — byte length of the source that was rejected.
 - `available` — bytes of global position space that remained.
 
-Returned when the new source is larger than the bytes left in the global space —
-because the single source exceeds `u32::MAX` bytes, or because earlier sources
-consumed the remainder — or when the map already holds the maximum number of
-sources. The same source cannot be retried against the same map; split the input or
-start a fresh map.
+Returned when earlier sources have consumed the remainder of the 32-bit space, or
+when the map already holds the maximum number of sources. The same source cannot be
+retried against the same map; split the input or start a fresh map.
+
+**`NotUtf8 { name }`** — the source's bytes are not valid UTF-8.
+
+- `name` — display name of the source whose bytes failed validation.
+
+Returned by [`add_bytes`](#sourcemapadd_bytes) and [`add_file`](#sourcemapadd_file)
+for a truncated multi-byte sequence or a stray binary byte.
+
+**`Io { name, kind }`** (feature `std`) — a file's contents could not be read.
+
+- `name` — the path that was requested.
+- `kind` — the [`std::io::ErrorKind`] category (e.g. `NotFound`, `PermissionDenied`).
+
+Returned by [`add_file`](#sourcemapadd_file). The `ErrorKind` is stored instead of a
+full `std::io::Error` so the type stays `Clone` and `Eq` like the rest.
 
 ```rust
 use source_lang::SourceMapError;
@@ -448,17 +711,42 @@ assert_eq!(
     err.to_string(),
     "source of 10 bytes does not fit in the 4 bytes remaining in the global position space",
 );
+
+let err = SourceMapError::NotUtf8 { name: "blob.bin".into() };
+assert_eq!(err.to_string(), "source `blob.bin` is not valid UTF-8");
+```
+
+Handling every failure mode of a file load:
+
+```rust,no_run
+use source_lang::{SourceMap, SourceMapError};
+
+fn load(map: &mut SourceMap, path: &str) {
+    match map.add_file(path) {
+        Ok(id) => { let _ = id; /* track it */ }
+        Err(SourceMapError::Oversize { name, len }) => {
+            eprintln!("{name}: {len} bytes is too large; skipped");
+        }
+        Err(SourceMapError::Io { name, kind }) => {
+            eprintln!("{name}: could not read ({kind})");
+        }
+        Err(SourceMapError::NotUtf8 { name }) => {
+            eprintln!("{name}: not valid UTF-8");
+        }
+        Err(e) => eprintln!("{path}: {e}"),
+    }
+}
 ```
 
 ---
 
 ## Re-exported coordinate types
 
-source-lang re-exports the two `span-lang` types its API speaks in, so a consumer
-does not also have to name `span-lang` as a dependency:
+source-lang re-exports the `span-lang` types its API speaks in, so a consumer does
+not also have to name `span-lang` as a dependency:
 
 ```rust
-pub use span_lang::{BytePos, Span};
+pub use span_lang::{BytePos, LineCol, LineIndex, Span};
 ```
 
 - **`BytePos`** — a 32-bit byte offset. In this crate it is used for both *global*
@@ -467,8 +755,14 @@ pub use span_lang::{BytePos, Span};
 - **`Span`** — a half-open `start..end` byte range, returned by
   [`SourceFile::span`](#sourcefile). `.start()`, `.end()`, `.len()`,
   `.contains(pos)`.
+- **`LineCol`** — a 1-based `line:col` coordinate, returned by
+  [`line_col`](#sourcemapline_col). Public `.line` and `.col` fields;
+  `LineCol::new(line, col)`; `Display` formats as `line:col`.
+- **`LineIndex`** — a byte-offset → line/column index over one source, returned by
+  [`SourceFile::line_index`](#sourcefileline_index). `.line_col(pos)`,
+  `.offset(line_col)`, `.line_span(line)`, `.line_count()`.
 
-See the [`span-lang` docs](https://docs.rs/span-lang) for the full surface of both.
+See the [`span-lang` docs](https://docs.rs/span-lang) for the full surface of all four.
 
 ```rust
 use source_lang::{BytePos, Span, SourceMap};
@@ -486,7 +780,7 @@ assert!(!span.contains(BytePos::new(6))); // half-open: end excluded
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std`   | yes     | Pulls in the standard library and enables `span-lang/std`. Reserved for the disk file-loading added in a later phase; in-memory sources do not require it. |
+| `std`   | yes     | Pulls in the standard library and enables `span-lang/std`. Required for disk file-loading ([`add_file`](#sourcemapadd_file)); in-memory sources do not need it. |
 | `serde` | no      | Forwards to `span-lang/serde`. Serialisation of source-map metadata is part of a later phase. |
 
 Disabling `std` keeps the crate `no_std` (it always needs `alloc`):

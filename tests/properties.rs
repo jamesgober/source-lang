@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used)]
 
 use proptest::prelude::*;
-use source_lang::{BytePos, SourceId, SourceMap};
+use source_lang::{BytePos, LineIndex, SourceId, SourceMap};
 
 /// The reference resolver: walk every source in order and return the first whose
 /// range contains `pos`. `O(files)`, obviously correct, and the oracle the real
@@ -95,6 +95,29 @@ proptest! {
         let pos = BytePos::new(raw % (span + 8));
         let hits = map.iter().filter(|(_, f)| f.span().contains(pos)).count();
         prop_assert!(hits <= 1);
+    }
+
+    /// Global `line_col` agrees with resolving the position per-file: locate the
+    /// source the naive way, build a fresh line index over just that source, and
+    /// the line/column must match what the map returns in one step.
+    #[test]
+    fn line_col_matches_per_file_resolution(
+        texts in prop::collection::vec("(?s).{0,40}", 0..40),
+        raw in any::<u32>(),
+    ) {
+        let map = build(&texts);
+        let span = space_end(&map);
+        prop_assume!(span > 0);
+        let pos = BytePos::new(raw % span); // strictly in range
+
+        let got = map.line_col(pos).expect("in-range position resolves");
+
+        // Reference: find the source by naive scan, then index that source alone.
+        let (id, local) = naive_locate(&map, pos).expect("same in-range position");
+        let file = map.source(id).expect("located id is valid");
+        let expected = LineIndex::new(file.text()).line_col(local);
+
+        prop_assert_eq!(got, (id, expected));
     }
 
     /// Ids are unique and dense: `iter` yields exactly `0..len`, and `add`
