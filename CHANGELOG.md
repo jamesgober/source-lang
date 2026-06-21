@@ -21,6 +21,30 @@
 
 ---
 
+## [0.4.0] - 2026-06-20
+
+Optional `serde` support and the public-surface freeze. The source map can be
+serialised and restored, and the API is now declared frozen for the rest of the 0.x
+series — only documentation, tests, and internal work land before `1.0.0`.
+
+### Added
+
+- `serde::Serialize` / `serde::Deserialize` for `SourceMap` under the `serde`
+  feature. The wire form is the list of sources plus the size ceiling;
+  deserialisation rebuilds the map through the same insertion path as `add`, so
+  spans, ids, and the high-water mark are regenerated and the non-overlap invariant
+  holds even for hand-edited input. The ceiling field is optional on read for
+  forward compatibility.
+- `serde` support for `SourceId`, which serialises transparently as its `u32` index.
+- `PartialEq` / `Eq` for `SourceMap`.
+
+### Changed
+
+- The public API surface is **frozen** as of this release. No public items will be
+  added or changed before `1.0.0`; see [`docs/API.md`](docs/API.md).
+
+---
+
 ## [0.3.0] - 2026-06-20
 
 File loading and line integration. Sources can now be loaded from disk and from
@@ -101,7 +125,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/source-lang/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/source-lang/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/source-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/source-lang/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/source-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/source-lang/releases/tag/v0.1.0

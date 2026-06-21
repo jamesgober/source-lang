@@ -50,7 +50,7 @@ use crate::{SourceFile, SourceId, SourceMapError};
 /// // Anything past the last byte belongs to no file.
 /// assert_eq!(map.locate(BytePos::new(26)), None);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceMap {
     /// Sources in insertion order; always sorted by `span().start()` because
     /// each new base is the previous high-water mark.
@@ -512,6 +512,85 @@ impl SourceMap {
             .enumerate()
             // `i < files.len() <= u32::MAX`, so the cast is lossless.
             .map(|(i, file)| (SourceId::from_index(i as u32), file))
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde_support {
+    //! `serde` for [`SourceMap`]. The wire form is the list of sources — name and
+    //! text — plus the size ceiling; everything else (spans, ids, the high-water
+    //! mark) is derived, so it is regenerated on load rather than trusted from the
+    //! bytes. Deserialisation replays the sources through the same insertion path
+    //! as [`SourceMap::add`], which keeps the non-overlap and unique-id invariants
+    //! intact even if the input was hand-edited or corrupted.
+
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use serde::de::Error as _;
+    use serde::ser::SerializeStruct;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::SourceMap;
+
+    /// Borrowed view of one source, so serialising copies no text.
+    #[derive(Serialize)]
+    struct SourceRef<'a> {
+        name: &'a str,
+        text: &'a str,
+    }
+
+    /// Owned form held only while deserialising, before the map is rebuilt.
+    #[derive(Deserialize)]
+    struct SourceOwned {
+        name: String,
+        text: String,
+    }
+
+    /// Default ceiling for input that predates the field, matching [`SourceMap::new`].
+    fn unbounded() -> u32 {
+        u32::MAX
+    }
+
+    #[derive(Deserialize)]
+    struct MapData {
+        sources: Vec<SourceOwned>,
+        #[serde(default = "unbounded")]
+        max_source_len: u32,
+    }
+
+    impl Serialize for SourceMap {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let sources: Vec<SourceRef<'_>> = self
+                .files
+                .iter()
+                .map(|f| SourceRef {
+                    name: f.name(),
+                    text: f.text(),
+                })
+                .collect();
+            let mut state = serializer.serialize_struct("SourceMap", 2)?;
+            state.serialize_field("sources", &sources)?;
+            state.serialize_field("max_source_len", &self.max_source_len)?;
+            state.end()
+        }
+    }
+
+    impl<'de> Deserialize<'de> for SourceMap {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let data = MapData::deserialize(deserializer)?;
+            // Rebuild through `push` so spans, ids, and the high-water mark are
+            // regenerated and validated. The ceiling is applied only afterwards, so
+            // sources accepted under a looser limit are not rejected on reload.
+            let mut map = SourceMap::with_capacity(data.sources.len());
+            for source in data.sources {
+                let _ = map
+                    .push(source.name.into(), source.text.into())
+                    .map_err(D::Error::custom)?;
+            }
+            map.max_source_len = data.max_source_len;
+            Ok(map)
+        }
     }
 }
 

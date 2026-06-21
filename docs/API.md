@@ -1,9 +1,10 @@
 # source-lang &mdash; API Reference
 
 > Complete reference for every public item in `source-lang`, with examples.
-> **Status: pre-1.0.** The core source-map surface below is implemented and stable
-> within the 0.x series; it is frozen at `1.0.0`. See [`dev/ROADMAP.md`](../dev/ROADMAP.md)
-> for what each later phase adds.
+> **Status: frozen.** As of `0.4.0` the public surface below is complete and will
+> not change before `1.0.0` — only documentation, tests, and internal work follow.
+> `1.0.0` ratifies this surface and holds it stable until `2.0`. See
+> [`dev/ROADMAP.md`](../dev/ROADMAP.md).
 
 ## Table of Contents
 
@@ -28,6 +29,7 @@
 - [`SourceId`](#sourceid)
 - [`SourceMapError`](#sourcemaperror)
 - [Re-exported coordinate types](#re-exported-coordinate-types)
+- [Serialization](#serialization)
 - [Feature flags](#feature-flags)
 
 ---
@@ -50,7 +52,7 @@ rendering live in other crates.
 
 ```toml
 [dependencies]
-source-lang = "0.3"
+source-lang = "0.4"
 ```
 
 Or from the terminal:
@@ -776,12 +778,49 @@ assert!(!span.contains(BytePos::new(6))); // half-open: end excluded
 
 ---
 
+## Serialization
+
+With the `serde` feature, [`SourceMap`](#sourcemap) and [`SourceId`](#sourceid)
+implement `serde::Serialize` and `serde::Deserialize`, and the re-exported
+coordinate types carry their `span-lang` serde implementations.
+
+A `SourceMap` is serialised as its list of sources — each a `{ name, text }` — plus
+the size ceiling. The derived state (each source's span, its id, and the global
+high-water mark) is **not** stored: it is regenerated on load by replaying the
+sources through the same insertion path as [`add`](#sourcemapadd). One consequence
+is that deserialisation validates its input — overlapping ranges or a corrupt layout
+cannot be smuggled in, because the layout is rebuilt rather than trusted — and a
+source list whose combined length overruns the 32-bit space is a deserialisation
+error rather than a broken map. The `max_source_len` field is optional on read
+(defaulting to `u32::MAX`), so a map written by an older version still loads.
+
+```rust,ignore
+use source_lang::{BytePos, SourceMap};
+
+let mut map = SourceMap::new();
+map.add("main.rs", "fn main() {}").expect("fits");
+map.add("util.rs", "let x = 1;\nlet y = 2;").expect("fits");
+
+// Round-trips through any serde format; spans, ids, and resolution survive.
+let json = serde_json::to_string(&map)?;
+let restored: SourceMap = serde_json::from_str(&json)?;
+
+assert_eq!(map, restored);
+assert_eq!(restored.line_col(BytePos::new(23)).unwrap().1.line, 2);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A [`SourceId`](#sourceid) serialises transparently as its `u32` index, so a handle
+stored in an AST node or a cached diagnostic round-trips on its own.
+
+---
+
 ## Feature flags
 
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `std`   | yes     | Pulls in the standard library and enables `span-lang/std`. Required for disk file-loading ([`add_file`](#sourcemapadd_file)); in-memory sources do not need it. |
-| `serde` | no      | Forwards to `span-lang/serde`. Serialisation of source-map metadata is part of a later phase. |
+| `serde` | no      | Derives `Serialize`/`Deserialize` for `SourceMap` and `SourceId`, and forwards to `span-lang/serde` for the coordinate types. See [Serialization](#serialization). |
 
 Disabling `std` keeps the crate `no_std` (it always needs `alloc`):
 

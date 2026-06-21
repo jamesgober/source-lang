@@ -37,7 +37,7 @@
 
 ```toml
 [dependencies]
-source-lang = "0.3"
+source-lang = "0.4"
 ```
 
 Or from the terminal:
@@ -139,6 +139,18 @@ assert_eq!(names, ["a.txt", "b.txt"]);
 # Ok::<(), source_lang::SourceMapError>(())
 ```
 
+With the `serde` feature, a whole `SourceMap` round-trips through any serde format —
+its spans and ids are regenerated on load, so the layout is validated rather than
+trusted:
+
+```rust,ignore
+let mut map = SourceMap::new();
+map.add("main.rs", "fn main() {}")?;
+let json = serde_json::to_string(&map)?;
+let restored: SourceMap = serde_json::from_str(&json)?;
+assert_eq!(map, restored);
+```
+
 See <a href="./docs/API.md"><code>docs/API.md</code></a> for the full reference.
 
 <br>
@@ -158,16 +170,16 @@ overrunning it is a defined error, never a silent wrap into a neighbour's range.
 
 ## Status
 
-<code>v0.3.0</code> adds loading and line resolution on top of the core: sources load
-from disk (<code>add_file</code>) and from raw byte buffers (<code>add_bytes</code>)
-through one set of checks, every bad input is a defined error, and
-<code>line_col</code> resolves a global position to file plus line/column in one
-step. The <code>SourceMap</code>, stable <code>SourceId</code>s, the non-overlapping
-global position space, and the <code>O(log files)</code> resolver from
-<code>v0.2.0</code> remain, each invariant property-tested against a naive linear
-scan. Optional <code>serde</code> for the map metadata lands next per the
-<a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>; the public API is frozen at
-<code>1.0.0</code>.
+<code>v0.4.0</code> adds optional <code>serde</code> support and <strong>freezes the
+public API</strong>: a <code>SourceMap</code> round-trips through any serde format,
+and no public items will change before <code>1.0.0</code>. The surface this freezes
+is the full source map — the <code>SourceMap</code>, stable <code>SourceId</code>s,
+and the non-overlapping global position space with its <code>O(log files)</code>
+resolver (from <code>v0.2.0</code>), plus disk and buffer loading and
+<code>line_col</code> resolution (from <code>v0.3.0</code>) — each invariant
+property-tested against a naive linear scan. <code>1.0.0</code> ratifies this surface
+and holds it stable until <code>2.0</code>; see the
+<a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
 
 <hr>
 <br>

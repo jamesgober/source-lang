@@ -29,6 +29,10 @@
 /// assert_eq!(second.to_u32(), 1);
 /// assert_ne!(first, second);
 /// ```
+///
+/// With the `serde` feature it serialises transparently as its `u32` index, so a
+/// handle stored in an AST node or a cached diagnostic round-trips on its own.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceId(u32);
 
