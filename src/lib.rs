@@ -69,6 +69,7 @@ extern crate alloc;
 mod error;
 mod file;
 mod id;
+mod lines;
 mod map;
 
 pub use error::SourceMapError;

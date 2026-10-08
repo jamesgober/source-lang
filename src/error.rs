@@ -45,7 +45,10 @@ pub enum SourceMapError {
     Oversize {
         /// Display name of the source that was rejected.
         name: Box<str>,
-        /// Byte length of the source.
+        /// Byte length of the source. For a file whose length is not known
+        /// before reading (a pipe, a virtual file, a file growing while read),
+        /// this is the number of bytes read before loading stopped (one past the
+        /// ceiling), a lower bound on the true length.
         len: u64,
     },
 

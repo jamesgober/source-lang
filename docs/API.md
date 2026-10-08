@@ -213,8 +213,12 @@ existing source and returning its [`SourceId`](#sourceid).
 
 The new source takes the range `next..next + text.len()`, where `next` is the
 current end of the global space. Adding empty `text` is allowed: it yields a valid
-id whose source has a zero-width span and does not advance the space, so it can
-never be the target of a [`locate`](#sourcemaplocate).
+id whose source has a zero-width span and does not advance the space. It is located
+only while it is the last source (its offset is then the end of the space, see
+[`locate`](#sourcemaplocate)); otherwise its offset is the next source's first byte.
+
+This is also where the source's line table is built, in one pass, so that
+[`line_col`](#sourcemapline_col) never rescans the text afterwards (since `1.0.1`).
 
 **Errors**
 
@@ -316,7 +320,10 @@ Reads a file from disk and adds its contents as a source named by `path`. Requir
 the default `std` feature. The file's size is checked against
 [`max_source_len`](#sourcemapmax_source_len--set_max_source_len) from its metadata
 *before* any byte is read, so an oversize file is rejected without being loaded into
-memory. The contents are then validated as UTF-8 and stored.
+memory. The read itself is bounded too (since `1.0.1`): it stops one byte past the
+ceiling, so a file whose metadata reports no length (a pipe, a `/proc` file) or a
+file that grows while it is read can never pull more than `max_source_len + 1` bytes
+into memory. The contents are then validated as UTF-8 and stored.
 
 **Parameters**
 
@@ -326,7 +333,9 @@ memory. The contents are then validated as UTF-8 and stored.
 **Errors**
 
 - [`SourceMapError::Oversize`](#sourcemaperror) if the file's metadata length
-  exceeds [`max_source_len`](#sourcemapmax_source_len--set_max_source_len).
+  exceeds [`max_source_len`](#sourcemapmax_source_len--set_max_source_len), or if
+  the read reaches past it; then `len` is the number of bytes read before stopping
+  (`max_source_len + 1`), a lower bound on the true size.
 - [`SourceMapError::Io`](#sourcemaperror) if the path cannot be opened or read — a
   missing file, a directory, a permission error.
 - [`SourceMapError::NotUtf8`](#sourcemaperror) if the contents are not valid UTF-8.
@@ -379,11 +388,29 @@ offsets, `O(log files)`, allocation-free.
 **Returns**
 
 `Some((id, local))` where `local` is `pos` minus the source's base — i.e. the
-offset into [`SourceFile::text`](#sourcefile). Returns `None` when `pos` belongs to
-no source: past the end of the last one, or at the exact offset of a zero-width
-source. Membership is half-open: a source covering `start..end` contains `start`
-but not `end`, so the boundary between two adjacent sources resolves to the second,
-never to both.
+offset into [`SourceFile::text`](#sourcefile). Membership is half-open: a source
+covering `start..end` contains `start` but not `end`, so the boundary between two
+adjacent sources resolves to the second, never to both.
+
+**End of input (since `1.0.1`, ISSUES H04).** One extension: the end of the
+**last** source, the current end of the global space, resolves to that source with
+`local` equal to its length. That is where an end-of-input diagnostic (a zero-width
+span at the end of the text) points, so end-of-input errors in the most recently
+added source, in particular in a single-source map, now resolve to it, and an empty
+last source is locatable. Up to `1.0.0` that position returned `None`. Every other
+answer, and every base, is unchanged from `1.0.0`.
+
+Returns `None` past the end of the space, on an empty map, and at the offset of an
+empty source that is not the last one (that offset is the next source's first byte).
+
+> **Known limitation (1.x).** Sources are laid out contiguously, so the end of a
+> source that is **not** the last one is the same position as the next source's
+> first byte. That position resolves to the next source at local offset `0`: an
+> end-of-input diagnostic for an earlier source is attributed to the following
+> source's `1:1`. Telling the two apart needs one reserved end position per source
+> (the layout rustc's source map uses), which moves every later source's base. That
+> breaks code that predicts bases from lengths (repl-lang does), so it is
+> semver-major and is planned for `2.0`.
 
 ```rust
 use source_lang::{BytePos, SourceMap};
@@ -396,8 +423,10 @@ assert_eq!(map.locate(BytePos::new(0)), Some((a, BytePos::new(0))));
 assert_eq!(map.locate(BytePos::new(2)), Some((a, BytePos::new(2))));
 // The shared boundary at 3 is the start of `b`.
 assert_eq!(map.locate(BytePos::new(3)), Some((b, BytePos::new(0))));
-// Past the last byte: no file.
-assert_eq!(map.locate(BytePos::new(5)), None);
+// The end of the last file is its end-of-input position (since 1.0.1)...
+assert_eq!(map.locate(BytePos::new(5)), Some((b, BytePos::new(2))));
+// ...and anything past it belongs to no file.
+assert_eq!(map.locate(BytePos::new(6)), None);
 ```
 
 Reading the located text back out of the resolved source:
@@ -435,12 +464,12 @@ not by its byte width.
 **Returns**
 
 `Some((id, line_col))`, or `None` exactly when [`locate`](#sourcemaplocate) returns
-`None` — a position past the end of the last source, or at a zero-width source.
+`None`. The source is chosen exactly as `locate` chooses it, so the end of the last
+source resolves to it, one column past its last character (since `1.0.1`).
 
-> **Cost.** Each call builds a line index over the located source, an
-> `O(source len)` scan. To resolve many positions in the same source, take a
-> reusable index once with [`SourceFile::line_index`](#sourcefileline_index)
-> instead of calling `line_col` repeatedly.
+> **Cost.** `O(log files + log lines)` plus a character count within the one
+> located line. Since `1.0.1` the line table is built once, when the source is
+> added; before that, every call rescanned the whole source.
 
 ```rust
 use source_lang::{BytePos, LineCol, SourceMap};
@@ -618,11 +647,14 @@ pub fn line_index(&self) -> LineIndex<'_>
 Builds a reusable [`LineIndex`](#re-exported-coordinate-types) over this source's
 text. The index borrows the source for as long as the `SourceFile` is borrowed, so
 it can be kept and queried many times without re-scanning. Building it is the only
-`O(text len)` step; each `line_col` / `offset` lookup on it is sub-linear.
+`O(text len)` step; each `line_col` / `offset` / `line_span` lookup on it is
+sub-linear.
 
-Prefer this over [`SourceMap::line_col`](#sourcemapline_col) when resolving several
-positions in one source — that convenience method builds a fresh index per call,
-whereas this builds it once and the caller reuses it.
+For plain line/column resolution, [`SourceMap::line_col`](#sourcemapline_col) needs
+no index: since `1.0.1` it answers from a line table built once when the source is
+added. Take a `LineIndex` for what only it offers — the inverse `offset` lookup and
+`line_span` — and keep it rather than rebuilding it, since each call to this method
+scans the text again (`span-lang` 0.4's `LineIndex` cannot adopt the cached table).
 
 ```rust
 use source_lang::{BytePos, LineCol, SourceMap};
@@ -697,7 +729,9 @@ the offending source's name), and implements `core::error::Error` and `Display`.
 ceiling ([`max_source_len`](#sourcemapmax_source_len--set_max_source_len)).
 
 - `name` — display name of the rejected source.
-- `len` — its byte length.
+- `len` — its byte length. For a file whose length is not known before reading
+  (a pipe, a virtual file, a file growing while read), the number of bytes read
+  before loading stopped (`max_source_len + 1`), a lower bound.
 
 For a file the length comes from the path's metadata, so an oversize file is rejected
 before its bytes are read.

@@ -47,14 +47,24 @@ use crate::{SourceFile, SourceId, SourceMapError};
 /// // Position 0 is the very start of the first file.
 /// assert_eq!(map.locate(BytePos::new(0)).unwrap().0, main);
 ///
-/// // Anything past the last byte belongs to no file.
-/// assert_eq!(map.locate(BytePos::new(26)), None);
+/// // The end of the last file is still in it (its end-of-input position)...
+/// assert_eq!(map.locate(BytePos::new(26)), Some((util, BytePos::new(14))));
+/// // ...but anything past it belongs to no file.
+/// assert_eq!(map.locate(BytePos::new(27)), None);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceMap {
     /// Sources in insertion order; always sorted by `span().start()` because
     /// each new base is the previous high-water mark.
     files: Vec<SourceFile>,
+    /// Each source's global start offset, parallel to `files`. `locate` binary
+    /// searches this dense `u32` array rather than the larger `SourceFile`
+    /// records, so a lookup touches four bytes per probe.
+    starts: Vec<u32>,
+    /// Each source's line-start table, parallel to `files`, built once in
+    /// `push` (see the `lines` module). Pure functions of the texts, so the
+    /// derived equality is unaffected.
+    lines: Vec<Box<[u32]>>,
     /// The next free global offset — the exclusive end of the last source's
     /// range, and the base the next source will be placed at.
     next_base: u32,
@@ -90,6 +100,8 @@ impl SourceMap {
     pub const fn new() -> Self {
         Self {
             files: Vec::new(),
+            starts: Vec::new(),
+            lines: Vec::new(),
             next_base: 0,
             max_source_len: u32::MAX,
         }
@@ -116,6 +128,8 @@ impl SourceMap {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             files: Vec::with_capacity(capacity),
+            starts: Vec::with_capacity(capacity),
+            lines: Vec::with_capacity(capacity),
             next_base: 0,
             max_source_len: u32::MAX,
         }
@@ -177,8 +191,13 @@ impl SourceMap {
     /// callers can borrow it back for the life of the map.
     ///
     /// Adding an empty `text` is allowed: it yields a valid id whose source has a
-    /// zero-width span and does not advance the global space, so it can never be
-    /// the target of a [`locate`](SourceMap::locate).
+    /// zero-width span and does not advance the global space. It is located only
+    /// while it is the last source (its position is then the end of the space,
+    /// see [`locate`](SourceMap::locate)); otherwise its offset is the next
+    /// source's first byte.
+    ///
+    /// This is also where the source's line table is built, in one pass, so that
+    /// [`line_col`](SourceMap::line_col) never rescans the text afterwards.
     ///
     /// # Errors
     ///
@@ -254,13 +273,18 @@ impl SourceMap {
     ///
     /// The file's size is checked against [`max_source_len`](SourceMap::max_source_len)
     /// from its metadata *before* a single byte is read, so an oversize file is
-    /// rejected without being loaded into memory. The bytes are then validated as
-    /// UTF-8 and stored. The source's name is the path as given.
+    /// rejected without being loaded into memory. The read itself is bounded too:
+    /// it stops one byte past the ceiling, so a source whose metadata reports no
+    /// length (a pipe, a `/proc` file) or a file that grows while it is read can
+    /// never pull more than `max_source_len + 1` bytes into memory. The bytes are
+    /// then validated as UTF-8 and stored. The source's name is the path as given.
     ///
     /// # Errors
     ///
     /// - [`SourceMapError::Oversize`] if the file's metadata length exceeds
-    ///   [`max_source_len`](SourceMap::max_source_len).
+    ///   [`max_source_len`](SourceMap::max_source_len), or if the read reaches
+    ///   past it (then `len` is the number of bytes read before stopping,
+    ///   `max_source_len + 1`, a lower bound on the true size).
     /// - [`SourceMapError::Io`] if the path cannot be opened or read (missing
     ///   file, a directory, permission denied).
     /// - [`SourceMapError::NotUtf8`] if the contents are not valid UTF-8.
@@ -285,31 +309,42 @@ impl SourceMap {
         &mut self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<SourceId, SourceMapError> {
-        use std::io::Read;
-
         let path = path.as_ref();
         let name: Box<str> = Box::from(path.to_string_lossy().as_ref());
 
-        let io_err = |e: std::io::Error| SourceMapError::Io {
-            name: name.clone(),
-            kind: e.kind(),
-        };
-
         // Reject from metadata before reading, so an oversize file never lands in
         // memory. A file without a queryable length (a pipe, some virtual files)
-        // falls through to the streaming read, which the push guard still bounds.
-        let mut file = std::fs::File::open(path).map_err(io_err)?;
-        if let Ok(meta) = file.metadata() {
-            if meta.len() > u64::from(self.max_source_len) {
+        // falls through to the bounded read below.
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                return Err(SourceMapError::Io {
+                    name,
+                    kind: e.kind(),
+                });
+            }
+        };
+        let hint = match file.metadata() {
+            Ok(meta) if meta.len() > u64::from(self.max_source_len) => {
                 return Err(SourceMapError::Oversize {
                     name,
                     len: meta.len(),
                 });
             }
-        }
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        };
 
-        let mut bytes = Vec::new();
-        let _ = file.read_to_end(&mut bytes).map_err(io_err)?;
+        let bytes = match read_bounded(file, self.max_source_len, hint) {
+            Ok(Bounded::Within(bytes)) => bytes,
+            Ok(Bounded::Over(len)) => return Err(SourceMapError::Oversize { name, len }),
+            Err(e) => {
+                return Err(SourceMapError::Io {
+                    name,
+                    kind: e.kind(),
+                });
+            }
+        };
         match core::str::from_utf8(&bytes) {
             Ok(text) => self.push(name, Box::from(text)),
             Err(_) => Err(SourceMapError::NotUtf8 { name }),
@@ -342,6 +377,8 @@ impl SourceMap {
         let end = base + len;
         let span = Span::new(base, end);
         let id = SourceId::from_index(index);
+        self.lines.push(crate::lines::line_starts(&text));
+        self.starts.push(base);
         self.files.push(SourceFile::new(name, text, span));
         self.next_base = end;
         Ok(id)
@@ -355,11 +392,29 @@ impl SourceMap {
     /// start offsets, so it is `O(log files)` and borrows the located source
     /// rather than copying it.
     ///
-    /// Returns `None` when `pos` belongs to no source: past the end of the last
-    /// one, or — since a zero-width source contains no position — at the exact
-    /// offset of an empty source. The membership is half-open: a source covering
-    /// `start..end` contains `start` but not `end`, so the boundary between two
-    /// adjacent sources resolves to the second, never to both.
+    /// Membership is half-open: a source covering `start..end` contains `start`
+    /// but not `end`, so the boundary between two adjacent sources resolves to the
+    /// second, never to both. One extension (since 1.0.1): the end of the **last**
+    /// source, the current end of the global space, resolves to that source with a
+    /// local offset equal to its length. That is where an end-of-input diagnostic
+    /// (a zero-width span at the end of the text) points, so end-of-input errors in
+    /// the most recently added source (in particular in a single-source map)
+    /// resolve to it, and an empty last source is locatable. Up to 1.0.0 that
+    /// position returned `None`.
+    ///
+    /// Returns `None` past the end of the space, on an empty map, and at the
+    /// offset of an empty source that is not the last one (that offset is the next
+    /// source's first byte).
+    ///
+    /// # Known limitation
+    ///
+    /// Sources are laid out contiguously, so the end of a source that is **not**
+    /// the last one is the same position as the next source's first byte. That
+    /// position resolves to the next source, at local offset 0: an end-of-input
+    /// diagnostic for an earlier source is attributed to the following source's
+    /// `1:1`. Telling the two apart needs a layout change (one reserved end
+    /// position per source, as rustc does), which moves every later source's base
+    /// and so waits for 2.0.
     ///
     /// # Examples
     ///
@@ -373,7 +428,9 @@ impl SourceMap {
     /// assert_eq!(map.locate(BytePos::new(2)), Some((a, BytePos::new(2))));
     /// // The shared boundary at 3 is the start of `b`, not the end of `a`.
     /// assert_eq!(map.locate(BytePos::new(3)), Some((b, BytePos::new(0))));
-    /// assert_eq!(map.locate(BytePos::new(5)), None);
+    /// // The end of the last source is its end-of-input position (since 1.0.1).
+    /// assert_eq!(map.locate(BytePos::new(5)), Some((b, BytePos::new(2))));
+    /// assert_eq!(map.locate(BytePos::new(6)), None);
     /// ```
     #[must_use]
     pub fn locate(&self, pos: BytePos) -> Option<(SourceId, BytePos)> {
@@ -381,14 +438,19 @@ impl SourceMap {
 
         // The list is sorted by start offset, so the last source whose range
         // begins at or before `at` is the only one that can contain it.
-        let after = self
-            .files
-            .partition_point(|f| f.span().start().to_u32() <= at);
+        let after = self.starts.partition_point(|&start| start <= at);
         let index = after.checked_sub(1)?;
-        let file = &self.files[index];
-
-        if file.span().contains(pos) {
-            let local = at - file.span().start().to_u32();
+        // Contiguous layout: a source ends where the next begins, and the last
+        // one at the high-water mark. Half-open membership, plus the last
+        // source's end position.
+        let is_last = after == self.starts.len();
+        let end = if is_last {
+            self.next_base
+        } else {
+            self.starts[after]
+        };
+        if at < end || (is_last && at == end) {
+            let local = at - self.starts[index];
             // `index < files.len() <= u32::MAX`, so the cast is lossless.
             Some((SourceId::from_index(index as u32), BytePos::new(local)))
         } else {
@@ -404,12 +466,13 @@ impl SourceMap {
     /// column counts Unicode scalar values, so a multi-byte character advances
     /// the column by one, not by its byte width.
     ///
-    /// Returns `None` exactly when [`locate`](SourceMap::locate) does — for a
-    /// position past the end of the last source, or at a zero-width source.
+    /// The source is chosen exactly as [`locate`](SourceMap::locate) chooses it,
+    /// so the end of the last source resolves to it, one column past its last
+    /// character. Returns `None` exactly when `locate` does.
     ///
-    /// Each call builds a line index over the located source, an `O(source len)`
-    /// scan. To resolve many positions in the same source, take a reusable index
-    /// once with [`SourceFile::line_index`] instead.
+    /// Each call is `O(log files + log lines)` plus a character count within the
+    /// one located line: since 1.0.1 the source's line table is built once, when
+    /// the source is added, never per call.
     ///
     /// # Examples
     ///
@@ -429,9 +492,8 @@ impl SourceMap {
     pub fn line_col(&self, pos: BytePos) -> Option<(SourceId, LineCol)> {
         let (id, local) = self.locate(pos)?;
         // `locate` returned this id, so the source is present.
-        let line_col = self.files[id.to_u32() as usize]
-            .line_index()
-            .line_col(local);
+        let index = id.to_u32() as usize;
+        let line_col = crate::lines::line_col(self.files[index].text(), &self.lines[index], local);
         Some((id, line_col))
     }
 
@@ -512,6 +574,41 @@ impl SourceMap {
             .enumerate()
             // `i < files.len() <= u32::MAX`, so the cast is lossless.
             .map(|(i, file)| (SourceId::from_index(i as u32), file))
+    }
+}
+
+/// The outcome of a [`read_bounded`]: the bytes, or proof that the input runs
+/// past the ceiling.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+enum Bounded {
+    /// The whole input, no longer than the ceiling.
+    Within(Vec<u8>),
+    /// The input exceeded the ceiling; the number of bytes read before stopping.
+    Over(u64),
+}
+
+/// Reads `reader` to its end, but never more than `max + 1` bytes: the extra
+/// byte is how an over-long input is told apart from one exactly at the
+/// ceiling without reading the rest of it. This is what keeps a pipe, a
+/// zero-length-reporting virtual file, or a file growing under the reader from
+/// loading without bound when its metadata could not vouch for its size.
+///
+/// `hint` (the metadata length, or `0`) only pre-sizes the buffer, capped at the
+/// read limit so a wrong hint can never reserve more than the limit allows.
+#[cfg(feature = "std")]
+fn read_bounded(reader: impl std::io::Read, max: u32, hint: u64) -> std::io::Result<Bounded> {
+    use std::io::Read;
+
+    let limit = u64::from(max) + 1;
+    let capacity = usize::try_from(hint.min(limit)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    let _ = reader.take(limit).read_to_end(&mut bytes)?;
+    let read = bytes.len() as u64;
+    if read > u64::from(max) {
+        Ok(Bounded::Over(read))
+    } else {
+        Ok(Bounded::Within(bytes))
     }
 }
 
@@ -633,12 +730,81 @@ mod tests {
         let b = map.add("b", "de").expect("fits"); // 3..5
         assert_eq!(map.locate(BytePos::new(0)), Some((a, BytePos::new(0))));
         assert_eq!(map.locate(BytePos::new(2)), Some((a, BytePos::new(2))));
-        // The boundary belongs to the second file.
+        // The boundary belongs to the second file (unchanged in 1.0.1; see the
+        // known limitation on `locate`).
         assert_eq!(map.locate(BytePos::new(3)), Some((b, BytePos::new(0))));
         assert_eq!(map.locate(BytePos::new(4)), Some((b, BytePos::new(1))));
-        // End of the space and beyond are unmapped.
-        assert_eq!(map.locate(BytePos::new(5)), None);
+        // Behaviour change in 1.0.1 (ISSUES H04): the end of the space used to be
+        // unmapped. It is the last file's end-of-input position, where a "found
+        // end of input" diagnostic points, so it resolves to that file at its
+        // length. Beyond it is still unmapped.
+        assert_eq!(map.locate(BytePos::new(5)), Some((b, BytePos::new(2))));
         assert_eq!(map.locate(BytePos::new(6)), None);
+    }
+
+    #[test]
+    fn test_h04_end_of_last_file_is_locatable() {
+        // The lang-forge case: one source, an error at `Span::empty(len)`.
+        let src = "rule = 'a' |";
+        let mut map = SourceMap::new();
+        let id = map.add("g.sketch", src).expect("fits");
+        let eof = Span::empty(src.len() as u32);
+        assert_eq!(
+            map.locate(eof.start()),
+            Some((id, BytePos::new(src.len() as u32)))
+        );
+        // One column past the last character, on the last line.
+        assert_eq!(map.line_col(eof.start()), Some((id, LineCol::new(1, 13))));
+        assert_eq!(map.locate(BytePos::new(src.len() as u32 + 1)), None);
+    }
+
+    #[test]
+    fn test_h04_end_of_the_most_recent_file_is_locatable() {
+        let mut map = SourceMap::new();
+        let _a = map.add("a", "x = 1\n").expect("fits"); // 0..6
+        let b = map.add("b", "y = 2\n").expect("fits"); // 6..12
+        // EOF of the last file, after its trailing newline: `b` 2:1.
+        assert_eq!(map.locate(BytePos::new(12)), Some((b, BytePos::new(6))));
+        assert_eq!(
+            map.line_col(BytePos::new(12)),
+            Some((b, LineCol::new(2, 1)))
+        );
+        // Adding a third file moves the end of the space; 12 is now its start.
+        let c = map.add("c", "z").expect("fits"); // 12..13
+        assert_eq!(map.locate(BytePos::new(12)), Some((c, BytePos::new(0))));
+        assert_eq!(map.locate(BytePos::new(13)), Some((c, BytePos::new(1))));
+    }
+
+    #[test]
+    fn test_h04_known_limitation_inner_end_is_the_next_start() {
+        // Documented limitation of the contiguous layout (fixed in 2.0): the end
+        // of a file that is not the last one is the next file's first byte, and
+        // resolves there. This test pins 1.0.0's answer so 1.0.1 cannot drift.
+        let mut map = SourceMap::new();
+        let _a = map.add("a", "x = 1\n").expect("fits"); // 0..6
+        let b = map.add("b", "y = 2").expect("fits"); // 6..11
+        assert_eq!(map.locate(BytePos::new(6)), Some((b, BytePos::new(0))));
+        assert_eq!(map.line_col(BytePos::new(6)), Some((b, LineCol::new(1, 1))));
+    }
+
+    #[test]
+    fn test_h04_empty_last_file_is_locatable() {
+        // A lone empty source owns the end of the (empty) space.
+        let mut map = SourceMap::new();
+        let only = map.add("empty", "").expect("fits");
+        assert_eq!(map.locate(BytePos::new(0)), Some((only, BytePos::new(0))));
+        assert_eq!(
+            map.line_col(BytePos::new(0)),
+            Some((only, LineCol::new(1, 1)))
+        );
+        assert_eq!(map.locate(BytePos::new(1)), None);
+
+        // An empty source after a real one: the end of the space is now the empty
+        // source's position, so it wins over the previous source's end.
+        let mut map = SourceMap::new();
+        let _a = map.add("a", "ab").expect("fits"); // 0..2
+        let empty = map.add("empty", "").expect("fits"); // 2..2
+        assert_eq!(map.locate(BytePos::new(2)), Some((empty, BytePos::new(0))));
     }
 
     #[test]
@@ -658,6 +824,42 @@ mod tests {
         // Position 2 is the start of `b`, never the zero-width `empty`.
         assert_eq!(map.locate(BytePos::new(2)), Some((b, BytePos::new(0))));
         assert_eq!(map.locate(BytePos::new(1)), Some((a, BytePos::new(1))));
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_read_bounded_stops_an_endless_stream_one_byte_past_the_ceiling() {
+        // `repeat` never ends: an unbounded `read_to_end` would never return.
+        let got = read_bounded(std::io::repeat(b'a'), 16, 0).expect("in-memory read");
+        assert!(matches!(got, Bounded::Over(17)), "got {got:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_read_bounded_accepts_exactly_the_ceiling_whatever_the_hint() {
+        // A hint that under- or over-states the size changes nothing but capacity.
+        for hint in [0, 3, 4, 1_000_000] {
+            match read_bounded(&b"abcd"[..], 4, hint).expect("in-memory read") {
+                Bounded::Within(bytes) => assert_eq!(bytes, b"abcd"),
+                other => panic!("hint {hint}: expected Within, got {other:?}"),
+            }
+        }
+        // One byte more is over, reported as the bytes read (max + 1).
+        let got = read_bounded(&b"abcde"[..], 4, 0).expect("in-memory read");
+        assert!(matches!(got, Bounded::Over(5)), "got {got:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_read_bounded_with_a_zero_ceiling() {
+        assert!(matches!(
+            read_bounded(&b""[..], 0, 0).expect("read"),
+            Bounded::Within(ref b) if b.is_empty()
+        ));
+        assert!(matches!(
+            read_bounded(&b"x"[..], 0, 0).expect("read"),
+            Bounded::Over(1)
+        ));
     }
 
     #[test]
@@ -685,6 +887,11 @@ mod tests {
             Span::new(u32::MAX - 4, u32::MAX)
         );
         assert_eq!(map.next_base, u32::MAX);
+        // Its end, the last position of the space, is its end-of-input position.
+        assert_eq!(
+            map.locate(BytePos::new(u32::MAX)),
+            Some((id, BytePos::new(4)))
+        );
     }
 
     #[test]
@@ -819,8 +1026,11 @@ mod tests {
     #[test]
     fn test_line_col_out_of_range_is_none() {
         let mut map = SourceMap::new();
-        map.add("a", "abc").expect("fits"); // 0..3
-        assert_eq!(map.line_col(BytePos::new(3)), None);
+        let a = map.add("a", "abc").expect("fits"); // 0..3
+        // Behaviour change in 1.0.1 (H04): the end of the last source is its
+        // end-of-input position (one column past `c`), no longer `None`.
+        assert_eq!(map.line_col(BytePos::new(3)), Some((a, LineCol::new(1, 4))));
+        assert_eq!(map.line_col(BytePos::new(4)), None);
         assert_eq!(map.line_col(BytePos::new(99)), None);
     }
 }

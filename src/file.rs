@@ -117,11 +117,14 @@ impl SourceFile {
     /// The returned [`LineIndex`] borrows the source for as long as the
     /// [`SourceFile`] is borrowed, so it can be kept and queried many times
     /// without re-scanning. Building it is the only `O(text len)` step; each
-    /// `line_col` / `offset` lookup on it is sub-linear.
+    /// `line_col` / `offset` / `line_span` lookup on it is sub-linear.
     ///
-    /// Prefer this over [`SourceMap::line_col`](crate::SourceMap::line_col) when
-    /// resolving several positions within one source — that convenience method
-    /// builds a fresh index per call, whereas this builds it once.
+    /// For plain line/column resolution, [`SourceMap::line_col`](crate::SourceMap::line_col)
+    /// needs no index at all: since 1.0.1 it answers from a line table the map
+    /// computes once when the source is added. Take a `LineIndex` when you need
+    /// what only it offers (the inverse [`offset`](LineIndex::offset) lookup or
+    /// [`line_span`](LineIndex::line_span)) and keep it rather than rebuilding it
+    /// per query: each call to this method scans the text again.
     ///
     /// # Examples
     ///

@@ -10,14 +10,20 @@ use proptest::prelude::*;
 use source_lang::{BytePos, LineIndex, SourceId, SourceMap};
 
 /// The reference resolver: walk every source in order and return the first whose
-/// range contains `pos`. `O(files)`, obviously correct, and the oracle the real
-/// `O(log files)` lookup must match.
+/// half-open range contains `pos`; failing that, if `pos` is the end of the last
+/// source (the end of the space, 1.0.1), the last source. `O(files)`, obviously
+/// correct, and the oracle the real `O(log files)` lookup must match.
 fn naive_locate(map: &SourceMap, pos: BytePos) -> Option<(SourceId, BytePos)> {
     for (id, file) in map.iter() {
         if file.span().contains(pos) {
             let local = pos.to_u32() - file.span().start().to_u32();
             return Some((id, BytePos::new(local)));
         }
+    }
+    let (id, last) = map.iter().last()?;
+    if last.span().end() == pos {
+        let local = pos.to_u32() - last.span().start().to_u32();
+        return Some((id, BytePos::new(local)));
     }
     None
 }
@@ -66,13 +72,58 @@ proptest! {
         let map = build(&texts);
         let span = space_end(&map);
         prop_assume!(span > 0);
-        let pos = BytePos::new(raw % span); // strictly in range
+        let pos = BytePos::new(raw % (span + 1)); // in range, end of space included
         let (id, local) = map.locate(pos).expect("in-range position resolves");
         let file = map.source(id).expect("located id is valid");
         // base + local == original global position.
         prop_assert_eq!(file.span().start().to_u32() + local.to_u32(), pos.to_u32());
-        // The local offset lands inside the file's text.
-        prop_assert!((local.to_u32() as usize) < file.text().len());
+        // The local offset lands inside the file's text, or at its end only for
+        // the end of the whole space.
+        if pos.to_u32() < span {
+            prop_assert!((local.to_u32() as usize) < file.text().len());
+        } else {
+            prop_assert_eq!(local.to_u32() as usize, file.text().len());
+        }
+    }
+
+    /// ISSUES H04: the end of the last source (the end of the space) resolves to
+    /// the last source at its length, whatever came before it, empty or not.
+    #[test]
+    fn h04_end_of_last_source_resolves_to_it(
+        texts in prop::collection::vec("(?s).{0,20}", 1..30),
+    ) {
+        let map = build(&texts);
+        let (last_id, last) = map.iter().last().expect("at least one source");
+        prop_assert_eq!(
+            map.locate(last.span().end()),
+            Some((last_id, BytePos::new(last.text().len() as u32)))
+        );
+        prop_assert_eq!(map.locate(BytePos::new(last.span().end().to_u32() + 1)), None);
+    }
+
+    /// 1.0.1 changes nothing but the end of the space: every other position
+    /// resolves exactly as the 1.0.0 half-open rule says (first source whose
+    /// `start..end` contains it), bases included.
+    #[test]
+    fn positions_before_the_end_are_unchanged_from_1_0_0(
+        texts in prop::collection::vec("(?s).{0,20}", 0..30),
+        raw in any::<u32>(),
+    ) {
+        let map = build(&texts);
+        // Bases are the running total of lengths (contiguous layout).
+        let mut total = 0u32;
+        for (_, file) in map.iter() {
+            prop_assert_eq!(file.span().start().to_u32(), total);
+            total += file.text().len() as u32;
+        }
+        let span = space_end(&map);
+        prop_assume!(span > 0);
+        let pos = BytePos::new(raw % span);
+        let expected = map
+            .iter()
+            .find(|(_, f)| f.span().contains(pos))
+            .map(|(id, f)| (id, BytePos::new(pos.to_u32() - f.span().start().to_u32())));
+        prop_assert_eq!(map.locate(pos), expected);
     }
 
     /// Ranges never overlap: sorted by start, each begins no earlier than the
@@ -108,7 +159,7 @@ proptest! {
         let map = build(&texts);
         let span = space_end(&map);
         prop_assume!(span > 0);
-        let pos = BytePos::new(raw % span); // strictly in range
+        let pos = BytePos::new(raw % (span + 1)); // in range, end of space included
 
         let got = map.line_col(pos).expect("in-range position resolves");
 

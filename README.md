@@ -170,8 +170,11 @@ overrunning it is a defined error, never a silent wrap into a neighbour's range.
 
 ## Status
 
-<code>v1.0.0</code> is the stable release: the public API is frozen and follows
-Semantic Versioning, with no breaking changes before <code>2.0</code>. The surface is
+<code>v1.0.1</code> is the current release (a patch on the stable <code>1.0</code>
+line): the public API is frozen and follows Semantic Versioning, with no breaking
+changes before <code>2.0</code>. 1.0.1 resolves the end of the last source to that
+source (end-of-input diagnostics), caches each source's line table, and bounds file
+reads; see the <a href="./CHANGELOG.md"><code>CHANGELOG</code></a>. The surface is
 the full source map &mdash; the <code>SourceMap</code>, stable <code>SourceId</code>s,
 and the non-overlapping global position space with its <code>O(log files)</code>
 resolver, disk and buffer loading, <code>line_col</code> resolution, and optional

@@ -124,3 +124,32 @@ fn test_add_file_at_the_size_ceiling_loads() {
     let id = map.add_file(&path).expect("a file at the ceiling loads");
     assert_eq!(map.source(id).unwrap().text(), "abcd");
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_add_file_without_a_metadata_length_is_still_bounded() {
+    // procfs files report a metadata length of 0 whatever they contain, so the
+    // metadata pre-check passes and only the bounded read (ISSUES M21) stops an
+    // oversize load. `/proc/self/status` is always well over 16 bytes.
+    let mut map = SourceMap::new();
+    map.set_max_source_len(16);
+    let err = map.add_file("/proc/self/status").unwrap_err();
+    match err {
+        SourceMapError::Oversize { len, .. } => assert_eq!(len, 17),
+        other => panic!("expected Oversize, got {other:?}"),
+    }
+    assert!(map.is_empty());
+}
+
+#[test]
+fn test_add_file_rereads_identically_through_the_bounded_reader() {
+    // A file well over the default read chunk exercises the pre-sized buffer.
+    let dir = TempDir::new();
+    let body = "line of text\n".repeat(10_000);
+    let path = dir.write("big.txt", body.as_bytes());
+
+    let mut map = SourceMap::new();
+    map.set_max_source_len(body.len() as u32);
+    let id = map.add_file(&path).expect("exactly at the ceiling");
+    assert_eq!(map.source(id).unwrap().text(), body);
+}

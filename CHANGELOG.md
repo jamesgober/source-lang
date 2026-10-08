@@ -21,6 +21,55 @@
 
 ---
 
+## [1.0.1] - 2026-10-08
+
+A patch release: no public API changes and no layout changes (every source's base
+and every interior `locate` answer is identical to 1.0.0). It lets end-of-input
+positions in the last source resolve (ISSUES H04), makes `line_col` independent of
+file size (M20), and bounds file reads (M21).
+
+### Fixed
+
+- **The end of the last source now resolves to it (H04).** `SourceMap::locate` (and
+  with it `line_col`) resolves the position equal to the end of the **last** source
+  (the end of the global space, previously `None`) to that source, with a local
+  offset equal to its length (`line_col`: one column past the last character).
+  That is where a "found end of input" diagnostic points, so end-of-input errors in
+  a single-source map (lang-forge's case) and in the most recently added source now
+  resolve, and an empty last source is locatable. Nothing else changes: membership
+  is still half-open, so an interior boundary still resolves to the later source.
+- **`add_file` reads are bounded (M21).** The read stops one byte past
+  `max_source_len`, so a source whose metadata reports no length (a pipe, a `/proc`
+  file) or a file that grows while it is read can no longer load without bound. Such
+  an input fails with `SourceMapError::Oversize`, whose `len` is then the number of
+  bytes read before stopping (`max_source_len + 1`). The buffer is pre-sized from
+  the metadata length, so a regular file is still read with one allocation.
+
+### Changed
+
+- **`line_col` no longer rescans the source (M20).** Each source's line-start table
+  is computed once, when it is added (one pass, allocated at its exact size: 4 bytes
+  per line, kept in a side table on the map; `SourceFile` is unchanged), and
+  `SourceMap::line_col` is now `O(log files + log lines)` plus a character count
+  within the located line. One million lookups over 16 files of 1,000 lines:
+  14.164 s before, 28.783 ms after.
+- `locate` binary-searches a dense array of start offsets (4 bytes per source)
+  instead of the `SourceFile` records; numbers in `docs/release/v1.0.1.md`.
+  `SourceFile::line_index` still builds a fresh `LineIndex` per call: `span-lang`
+  0.4's `LineIndex` has no constructor that could adopt the cached table.
+
+### Known limitations
+
+- **End of input in a source that is not the last one (H04, remainder).** Sources
+  are laid out contiguously, so the end of an earlier source is the same position as
+  the next source's first byte, and resolves to the next source at `1:1`. Fixing it
+  needs one reserved end position per source (rustc's layout), which shifts every
+  later base and breaks code that predicts bases from lengths (repl-lang does), so
+  it is semver-major and planned for **2.0**. An empty source that is not the last
+  one remains unlocatable for the same reason.
+
+---
+
 ## [1.0.0] - 2026-06-20
 
 The stable release. No new public API — this ratifies the surface frozen in `0.4.0`
@@ -140,7 +189,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/source-lang/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/source-lang/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/jamesgober/source-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/source-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/source-lang/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/source-lang/compare/v0.2.0...v0.3.0
