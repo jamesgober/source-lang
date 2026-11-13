@@ -68,8 +68,8 @@ Exit criteria:
 
 ## v1.0.1 — Patch: end-of-input in the last source, cached lines, bounded reads (DONE)
 
-No public API change and no layout change. Fixes from the LexerSketch issue ledger
-(`_lexersketch/ISSUES.md`): H04 (the non-breaking part), M20, M21.
+No public API change and no layout change. Fixes from the issue ledger:
+ H04 (the non-breaking part), M20, M21.
 
 Delivered:
 - [x] **H04 (non-breaking part)** `locate` / `line_col`: the end of the **last**
@@ -103,7 +103,7 @@ Moved to 2.0 (anti-deferral record):
   for 1.0.1, but the consumer check showed it breaks repl-lang (which predicts entry
   bases by summing lengths: wrong `Input::base`, `Entry::span`, and diagnostics after
   the first entry), so it is semver-major. The finished work is saved as Wave M:
-  `_lexersketch/waves/M-source-lang.md` and `M-source-lang-gap-layout.patch`.
+  The planning notes and `M-source-lang-gap-layout.patch`.
 - `SourceFile::line_index` still rebuilds a `LineIndex` per call. Serving it from
   the cached table needs a `LineIndex` constructor from precomputed line starts in
   `span-lang` (not in 0.4, and the 0.4 pin is family-wide). Additive, so a 1.1
