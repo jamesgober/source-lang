@@ -29,6 +29,16 @@ use crate::{SourceFile, SourceId, SourceMapError};
 ///
 /// [`SpaceExhausted`]: SourceMapError::SpaceExhausted
 ///
+/// # One map per compilation
+///
+/// A map only grows: it never frees a range of the position space or drops a
+/// source's text, because every id and global span it has handed out must keep
+/// resolving. Build one map per compilation and drop it afterwards. An editor or
+/// language server should build a fresh map for each revision it analyses rather
+/// than adding every revision of a file to one long-lived map, which would keep
+/// all of them in memory and reach [`SpaceExhausted`] after 4 GiB of cumulative
+/// text (a 1 MB file edited about 4,000 times).
+///
 /// # Examples
 ///
 /// ```

@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "source-lang"
-version = "1.0.1"
+version = "1.0.2"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
