@@ -33,6 +33,11 @@
 //! combined length of every source is capped at `u32::MAX`; overrunning it is a
 //! defined [`SourceMapError`], never a silent wrap.
 //!
+//! A map only grows: it keeps every source's text and never reuses a range, so
+//! that every id and span it has handed out keeps resolving. Use one map per
+//! compilation. An editor or language server should build a fresh map for each
+//! revision it analyses rather than adding every edit to one long-lived map.
+//!
 //! ## Quickstart
 //!
 //! ```

@@ -21,6 +21,22 @@
 
 ---
 
+## [1.0.2] - 2026-11-12
+
+A documentation patch. No code changes.
+
+### Changed
+
+- **A `SourceMap` is documented as per compilation.** The map only grows: it
+  keeps every source's text and never reuses a range of the 4 GiB position
+  space, so every id and span it has handed out keeps resolving. The crate docs,
+  the `SourceMap` rustdoc and `docs/API.md` now say so, and advise editors and
+  language servers to build a fresh map for each revision they analyse. Adding
+  every revision of a file to one long-lived map holds all of them in memory and
+  ends in `SpaceExhausted` after 4 GiB of cumulative text.
+
+---
+
 ## [1.0.1] - 2026-10-08
 
 A patch release: no public API changes and no layout changes (every source's base
@@ -189,7 +205,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/source-lang/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/jamesgober/source-lang/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/jamesgober/source-lang/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/jamesgober/source-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/source-lang/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/jamesgober/source-lang/compare/v0.3.0...v0.4.0

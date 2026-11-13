@@ -12,6 +12,7 @@
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [The model](#the-model)
+  - [One map per compilation](#one-map-per-compilation)
 - [`SourceMap`](#sourcemap)
   - [`SourceMap::new`](#sourcemapnew)
   - [`SourceMap::with_capacity`](#sourcemapwith_capacity)
@@ -127,6 +128,20 @@ The space is 32 bits wide — the same envelope a single
 every source is capped at `u32::MAX` (4 GiB). Overrunning that cap is the
 [`SourceMapError::SpaceExhausted`](#sourcemaperror) error, never a silent wrap of
 one source's base into a neighbour's range.
+
+### One map per compilation
+
+A `SourceMap` only grows. It never frees a range of the position space and never
+drops a source's text, because every [`SourceId`](#sourceid) and every global span
+it has handed out must keep resolving. Build one map per compilation (one build,
+one check, one language-server analysis pass) and drop it when that work is done.
+
+A long-running process such as an editor or language server should not add a new
+revision of a file to the same map on every edit. The map would hold every
+revision in memory, and after 4 GiB of cumulative text, for example a 1 MB file
+edited about 4,000 times, `add` returns `SpaceExhausted`. Build a fresh map for
+each revision you analyse instead, re-adding the current text of the files it
+needs. Spans and ids from one map are not meaningful in another.
 
 ---
 
